@@ -326,7 +326,7 @@ fn player_html(player_background: Hsla, cursor_asset: CursorAsset) -> String {
       const contentHeight = video.videoHeight * videoScale;
       const offsetX = (frameWidth - contentWidth) / 2;
       const offsetY = (frameHeight - contentHeight) / 2;
-      const renderScale = scale;
+      const renderScale = scale * videoScale;
       if (!Number.isFinite(renderScale) || renderScale <= 0) {{
         cursor.style.display = "none";
         return;
