@@ -19,6 +19,10 @@
 * Remove dead code, unused imports, temporary debugging code, and unnecessary dependencies.
 * Reuse existing utilities and patterns before introducing new ones.
 
+## Styling
+- Never hardcode colours.
+- Use themes.
+
 ## Naming
 
 - Use short, natural, descriptive names for functions, tests, variables, and modules.

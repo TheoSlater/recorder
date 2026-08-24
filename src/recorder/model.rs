@@ -3,7 +3,13 @@ use std::time::Duration;
 use gpui::SharedString;
 use windows_capture::monitor::Monitor;
 
-pub(crate) const OUTPUT_PATH: &str = "recording.mp4";
+pub(crate) const RECORDINGS_DIR: &str = "recordings";
+pub(crate) const VIDEO_FILE: &str = "recording.mp4";
+pub(crate) const TELEMETRY_FILE: &str = "telemetry.jsonl";
+pub(crate) const SESSION_FILE: &str = "session.json";
+pub(crate) const RECORDING_TIMEBASE: &str = "windows_qpc";
+pub(crate) const RECORDING_ZERO: &str = "first_accepted_video_frame";
+pub(crate) const CURSOR_CAPTURE: &str = "excluded";
 pub(crate) const FRAME_INTERVAL: Duration = Duration::from_nanos(16_666_667);
 
 #[derive(Clone)]
@@ -24,5 +30,6 @@ pub(crate) enum RecorderState {
 
 pub(crate) enum WorkerEvent {
     Started,
+    CaptureStopped,
     Finished(Result<(), String>),
 }

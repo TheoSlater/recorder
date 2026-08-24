@@ -10,6 +10,15 @@ pub(super) fn watch_worker(events: Receiver<WorkerEvent>, cx: &mut Context<Recor
             let events = events.clone();
             let event = cx.background_spawn(async move { events.recv().ok() }).await;
             let Some(event) = event else {
+                view.update(cx, |view, cx| {
+                    view.apply_worker_event(
+                        WorkerEvent::Finished(Err(
+                            "capture worker event channel closed".to_string()
+                        )),
+                        cx,
+                    );
+                })
+                .ok();
                 break;
             };
 
