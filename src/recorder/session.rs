@@ -9,6 +9,64 @@ use super::model::{
     CURSOR_CAPTURE, RECORDING_TIMEBASE, RECORDING_ZERO, RECORDINGS_DIR, SESSION_FILE,
     TELEMETRY_FILE, VIDEO_FILE,
 };
+use super::project;
+use super::project_settings::{ProjectSettings, save as save_project_settings};
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SessionSource {
+    Monitor {
+        name: String,
+        width: u32,
+        height: u32,
+    },
+    Window {
+        title: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        app_name: Option<String>,
+        width: u32,
+        height: u32,
+    },
+}
+
+impl SessionSource {
+    pub(crate) fn monitor(name: impl Into<String>, width: u32, height: u32) -> Self {
+        Self::Monitor {
+            name: name.into(),
+            width,
+            height,
+        }
+    }
+
+    pub(crate) fn window(
+        title: impl Into<String>,
+        app_name: Option<String>,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        Self::Window {
+            title: title.into(),
+            app_name,
+            width,
+            height,
+        }
+    }
+
+    fn legacy_name(&self) -> String {
+        match self {
+            Self::Monitor { name, .. } => name.clone(),
+            Self::Window { title, .. } => format!("Window · {title}"),
+        }
+    }
+
+    fn dimensions(&self) -> (u32, u32) {
+        match self {
+            Self::Monitor { width, height, .. } | Self::Window { width, height, .. } => {
+                (*width, *height)
+            }
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct SessionPaths {
@@ -17,28 +75,30 @@ pub(crate) struct SessionPaths {
     telemetry: PathBuf,
     metadata: PathBuf,
     created_at_utc: String,
-    monitor_name: String,
-    width: u32,
-    height: u32,
+    source: SessionSource,
 }
 
 impl SessionPaths {
-    pub(crate) fn create(monitor_name: &str, width: u32, height: u32) -> Result<Self, String> {
+    /// Creates a project folder and autosaves its manifest before capture starts.
+    pub(crate) fn create(source: SessionSource) -> Result<Self, String> {
         let root = PathBuf::from(RECORDINGS_DIR);
         fs::create_dir_all(&root)
             .map_err(|error| format!("failed to create {}: {error}", root.display()))?;
 
         let created_at_utc = utc_timestamp(SystemTime::now());
         let directory = create_unique_directory(&root, &created_at_utc)?;
+        save_project_settings(
+            &project::settings_file_name(&directory),
+            &ProjectSettings::default(),
+        )
+        .map_err(|error| format!("failed to initialize project settings: {error}"))?;
         let session = Self {
             video: directory.join(VIDEO_FILE),
             telemetry: directory.join(TELEMETRY_FILE),
             metadata: directory.join(SESSION_FILE),
             directory,
             created_at_utc,
-            monitor_name: monitor_name.to_string(),
-            width,
-            height,
+            source,
         };
 
         session
@@ -63,6 +123,24 @@ impl SessionPaths {
         &self.metadata
     }
 
+    pub(crate) fn set_captured_dimensions(&mut self, width: u32, height: u32) {
+        match &mut self.source {
+            SessionSource::Monitor {
+                width: source_width,
+                height: source_height,
+                ..
+            }
+            | SessionSource::Window {
+                width: source_width,
+                height: source_height,
+                ..
+            } => {
+                *source_width = width;
+                *source_height = height;
+            }
+        }
+    }
+
     pub(crate) fn complete(
         &self,
         result: &Result<(), String>,
@@ -82,8 +160,10 @@ impl SessionPaths {
         error: Option<&str>,
         dropped_frames: Option<u64>,
     ) -> io::Result<()> {
+        let legacy_name = self.source.legacy_name();
+        let (width, height) = self.source.dimensions();
         let metadata = SessionMetadata {
-            schema_version: 1,
+            schema_version: 2,
             status,
             created_at_utc: &self.created_at_utc,
             finished_at_utc: (status != "recording").then(|| utc_timestamp(SystemTime::now())),
@@ -93,10 +173,11 @@ impl SessionPaths {
             video_timestamp_unit: "100ns_relative_to_first_video_frame",
             telemetry_timestamp_unit: "microseconds_from_first_video_frame",
             monitor: SessionMonitor {
-                name: &self.monitor_name,
-                width: self.width,
-                height: self.height,
+                name: &legacy_name,
+                width,
+                height,
             },
+            source: &self.source,
             files: SessionFiles {
                 video: VIDEO_FILE,
                 telemetry: TELEMETRY_FILE,
@@ -130,6 +211,7 @@ struct SessionMetadata<'a> {
     video_timestamp_unit: &'static str,
     telemetry_timestamp_unit: &'static str,
     monitor: SessionMonitor<'a>,
+    source: &'a SessionSource,
     files: SessionFiles,
     dropped_frames: u64,
     error: Option<&'a str>,

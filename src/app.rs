@@ -4,13 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use gpui::{AppContext, WindowBounds, WindowOptions, px, size};
 use gpui_component::{Root, Theme};
 
-use crate::recorder::{RecorderView, ShutdownCoordinator, enumerate_monitors};
+use crate::recorder::{RecorderView, ShutdownCoordinator, enumerate_monitors, enumerate_windows};
 
 pub(crate) fn run() {
-    // WebView2 child windows need DirectComposition disabled with GPUI on Windows.
-    unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true") };
-
+    let _ = tracing_subscriber::fmt().with_target(true).try_init();
     let monitors = enumerate_monitors();
+    let windows = enumerate_windows();
+    let debug_video = std::env::var_os("RECORDER_DEBUG_OPEN_VIDEO").map(std::path::PathBuf::from);
     let shutdown = Arc::new(ShutdownCoordinator::new());
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
 
@@ -35,7 +35,12 @@ pub(crate) fn run() {
         .detach();
 
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(680.), px(400.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(760.), px(600.)), cx)),
+            window_min_size: Some(size(px(520.), px(440.))),
+            titlebar: Some(gpui::TitlebarOptions {
+                title: Some("Screen Recorder".into()),
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -78,11 +83,24 @@ pub(crate) fn run() {
                     })
                     .detach();
 
-                    RecorderView::new(monitors, shutdown.clone())
+                    RecorderView::new(monitors, windows, shutdown.clone())
                 });
+                if std::env::var_os("RECORDER_DEBUG_OPEN_LATEST").is_some() {
+                    view.update(cx, |view, cx| view.open_latest_project(cx));
+                }
                 cx.new(|cx| Root::new(view, window, cx))
             })
             .expect("failed to open recorder window");
+
+            if let Some(video_path) = debug_video {
+                if let Err(error) = crate::recorder::open_debug_video(cx, video_path) {
+                    tracing::error!(
+                        target: "recorder::playback",
+                        error = %error,
+                        "could not open debug playback video"
+                    );
+                }
+            }
         })
         .detach();
     });
