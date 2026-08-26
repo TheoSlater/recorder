@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use super::cursor_settings::CursorSettings;
+use super::motion_blur::MotionBlurSettings;
 use super::zoom::{CursorSizeRegion, ZoomRegion};
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 
 pub(super) const MIN_CANVAS_ZOOM: f64 = 0.25;
 pub(super) const MAX_CANVAS_ZOOM: f64 = 4.0;
@@ -27,6 +28,8 @@ pub(crate) struct ProjectSettings {
     pub(super) cursor: CursorSettings,
     #[serde(default)]
     pub(super) canvas: CanvasView,
+    #[serde(default)]
+    pub(super) motion_blur: MotionBlurSettings,
     #[serde(default)]
     pub(super) canvas_composition: CanvasComposition,
     #[serde(default)]
@@ -227,6 +230,7 @@ impl Default for ProjectSettings {
             schema_version: SCHEMA_VERSION,
             cursor: CursorSettings::default(),
             canvas: CanvasView::default(),
+            motion_blur: MotionBlurSettings::default(),
             canvas_composition: CanvasComposition::default(),
             zoom_regions: Vec::new(),
             cursor_size_regions: Vec::new(),
@@ -239,6 +243,7 @@ impl ProjectSettings {
         self.schema_version = SCHEMA_VERSION;
         self.cursor = self.cursor.normalized();
         self.canvas = self.canvas.normalized();
+        self.motion_blur = self.motion_blur.normalized();
         self.canvas_composition = self.canvas_composition.normalized();
         self.zoom_regions = self
             .zoom_regions

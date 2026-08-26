@@ -17,6 +17,7 @@ mod lifecycle;
 mod media;
 mod model;
 mod monitors;
+mod motion_blur;
 mod overlay;
 mod playback;
 mod project;
