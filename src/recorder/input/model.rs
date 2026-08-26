@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use super::super::model::{RECORDING_TIMEBASE, RECORDING_ZERO};
 
@@ -6,7 +6,7 @@ pub(crate) const SAMPLE_INTERVAL_US: u64 = 8_333;
 pub(crate) const TELEMETRY_SCHEMA_VERSION: u32 = 2;
 pub(crate) const COORDINATE_SPACE: &str = "virtual_desktop_pixels";
 
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 pub(crate) struct ButtonState {
     pub(crate) left: bool,
     pub(crate) right: bool,
@@ -27,7 +27,7 @@ pub(crate) struct CursorSample {
     pub(crate) buttons: ButtonState,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum MouseEventKind {
     LeftDown,

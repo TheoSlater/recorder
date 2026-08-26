@@ -11,6 +11,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::WindowsAndMessaging::{CURSOR_SHOWING, CURSORINFO, GetCursorInfo};
 use windows_capture::monitor::Monitor;
 
+use super::super::model::CaptureSource;
 use super::clock::RecordingClock;
 use super::model::{
     ButtonState, CursorSample, MonitorMetadata, MouseEvent, MouseEventKind, SAMPLE_INTERVAL_US,
@@ -35,17 +36,20 @@ pub(crate) struct CursorTracker {
 
 impl CursorTracker {
     pub(crate) fn spawn(
-        monitor: Monitor,
+        source: CaptureSource,
+        capture_width: u32,
+        capture_height: u32,
         clock: Arc<RecordingClock>,
         start_receiver: mpsc::Receiver<()>,
         telemetry_path: PathBuf,
     ) -> Result<Self, String> {
-        let metadata = monitor_metadata(&monitor)?;
+        let metadata = source_metadata(source, capture_width, capture_height)?;
         let (stop_sender, stop_receiver) = mpsc::channel();
         let join = thread::Builder::new()
             .name("cursor-telemetry".to_string())
             .spawn(move || {
                 track(
+                    source,
                     metadata,
                     clock,
                     start_receiver,
@@ -81,13 +85,14 @@ impl Drop for CursorTracker {
 }
 
 fn track(
+    source: CaptureSource,
     metadata: MonitorMetadata,
     clock: Arc<RecordingClock>,
     start_receiver: mpsc::Receiver<()>,
     stop_receiver: mpsc::Receiver<()>,
     telemetry_path: PathBuf,
 ) -> Result<(), String> {
-    let monitor = metadata.clone();
+    let fixed_region = metadata.clone();
     let mut telemetry = TelemetryWriter::new(&telemetry_path, metadata)?;
     if !wait_for_video_start(&start_receiver, &stop_receiver) {
         return telemetry.finish();
@@ -103,7 +108,11 @@ fn track(
             Some(timestamp_us) => timestamp_us,
             None => break Err("cursor clock was not started".to_string()),
         };
-        let sample = make_sample(timestamp_us, state, &monitor);
+        let (region, scale_x, scale_y) = match source {
+            CaptureSource::Monitor(_) => (fixed_region.clone(), 1.0, 1.0),
+            CaptureSource::Window(window) => window_region(&window, &fixed_region)?,
+        };
+        let sample = make_sample(timestamp_us, state, &region, scale_x, scale_y);
 
         if let Some(previous) = previous_buttons
             && let Err(error) =
@@ -148,7 +157,11 @@ fn wait_for_video_start(
     }
 }
 
-fn monitor_metadata(monitor: &Monitor) -> Result<MonitorMetadata, String> {
+fn monitor_metadata(
+    monitor: &Monitor,
+    capture_width: u32,
+    capture_height: u32,
+) -> Result<MonitorMetadata, String> {
     let mut info = MONITORINFO {
         cbSize: size_of::<MONITORINFO>() as u32,
         ..Default::default()
@@ -158,9 +171,7 @@ fn monitor_metadata(monitor: &Monitor) -> Result<MonitorMetadata, String> {
         return Err("failed to query selected monitor bounds".to_string());
     }
 
-    let width = info.rcMonitor.right.saturating_sub(info.rcMonitor.left);
-    let height = info.rcMonitor.bottom.saturating_sub(info.rcMonitor.top);
-    if width <= 0 || height <= 0 {
+    if info.rcMonitor.right <= info.rcMonitor.left || info.rcMonitor.bottom <= info.rcMonitor.top {
         return Err("selected monitor has invalid bounds".to_string());
     }
 
@@ -168,9 +179,68 @@ fn monitor_metadata(monitor: &Monitor) -> Result<MonitorMetadata, String> {
         device_name: monitor.device_name().map_err(|error| error.to_string())?,
         origin_x: info.rcMonitor.left,
         origin_y: info.rcMonitor.top,
-        width: width as u32,
-        height: height as u32,
+        width: capture_width,
+        height: capture_height,
     })
+}
+
+fn source_metadata(
+    source: CaptureSource,
+    capture_width: u32,
+    capture_height: u32,
+) -> Result<MonitorMetadata, String> {
+    match source {
+        CaptureSource::Monitor(monitor) => {
+            monitor_metadata(&monitor, capture_width, capture_height)
+        }
+        CaptureSource::Window(window) => window_metadata(&window, capture_width, capture_height),
+    }
+}
+
+fn window_metadata(
+    window: &windows_capture::window::Window,
+    capture_width: u32,
+    capture_height: u32,
+) -> Result<MonitorMetadata, String> {
+    let rect = window
+        .rect()
+        .map_err(|error| format!("failed to query selected window bounds: {error}"))?;
+    if rect.right <= rect.left || rect.bottom <= rect.top {
+        return Err("selected window has invalid bounds".to_string());
+    }
+
+    Ok(MonitorMetadata {
+        device_name: window
+            .title()
+            .unwrap_or_else(|_| "Captured window".to_string()),
+        origin_x: rect.left,
+        origin_y: rect.top,
+        width: capture_width,
+        height: capture_height,
+    })
+}
+
+fn window_region(
+    window: &windows_capture::window::Window,
+    capture_region: &MonitorMetadata,
+) -> Result<(MonitorMetadata, f32, f32), String> {
+    let rect = window
+        .rect()
+        .map_err(|error| format!("failed to track selected window bounds: {error}"))?;
+    let width = rect.right.saturating_sub(rect.left);
+    let height = rect.bottom.saturating_sub(rect.top);
+    if width <= 0 || height <= 0 {
+        return Err("selected window has invalid bounds".to_string());
+    }
+    Ok((
+        MonitorMetadata {
+            origin_x: rect.left,
+            origin_y: rect.top,
+            ..capture_region.clone()
+        },
+        capture_region.width as f32 / width as f32,
+        capture_region.height as f32 / height as f32,
+    ))
 }
 
 fn read_cursor_state() -> Result<CursorState, String> {
@@ -202,15 +272,21 @@ fn key_is_down(key: u16) -> bool {
     unsafe { GetAsyncKeyState(i32::from(key)) < 0 }
 }
 
-fn make_sample(timestamp_us: u64, state: CursorState, monitor: &MonitorMetadata) -> CursorSample {
-    let x = state.screen_x - monitor.origin_x;
-    let y = state.screen_y - monitor.origin_y;
+fn make_sample(
+    timestamp_us: u64,
+    state: CursorState,
+    region: &MonitorMetadata,
+    scale_x: f32,
+    scale_y: f32,
+) -> CursorSample {
+    let x = (state.screen_x - region.origin_x) as f32 * scale_x;
+    let y = (state.screen_y - region.origin_y) as f32 * scale_y;
     CursorSample {
         timestamp_us,
-        x: x as f32,
-        y: y as f32,
-        normalized_x: x as f32 / monitor.width as f32,
-        normalized_y: y as f32 / monitor.height as f32,
+        x,
+        y,
+        normalized_x: x / region.width as f32,
+        normalized_y: y / region.height as f32,
         screen_x: state.screen_x,
         screen_y: state.screen_y,
         cursor_id: state.cursor_id,
@@ -279,8 +355,13 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "requires interactive Windows cursor access"]
     fn tracker_writes_samples_after_video_start() {
         let monitor = Monitor::primary().expect("a primary monitor is required");
+        let width = monitor.width().expect("monitor width should be available");
+        let height = monitor
+            .height()
+            .expect("monitor height should be available");
         let clock = Arc::new(RecordingClock::new());
         let (start_sender, start_receiver) = mpsc::channel();
         let path = std::env::temp_dir().join(format!(
@@ -291,8 +372,15 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let tracker = CursorTracker::spawn(monitor, clock.clone(), start_receiver, path.clone())
-            .expect("cursor tracker should start");
+        let tracker = CursorTracker::spawn(
+            CaptureSource::Monitor(monitor),
+            width,
+            height,
+            clock.clone(),
+            start_receiver,
+            path.clone(),
+        )
+        .expect("cursor tracker should start");
 
         clock.mark_video_start();
         start_sender

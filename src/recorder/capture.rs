@@ -11,7 +11,6 @@ use windows_capture::capture::{Context as CaptureContext, GraphicsCaptureApiHand
 use windows_capture::encoder::VideoEncoder;
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
-use windows_capture::monitor::Monitor;
 use windows_capture::settings::{
     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
@@ -19,7 +18,7 @@ use windows_capture::settings::{
 
 use super::encoder::{EncoderPump, FrameTask, QueueStats, new_encoder};
 use super::input::{CursorTracker, RecordingClock};
-use super::model::{FRAME_INTERVAL, WorkerEvent};
+use super::model::{CaptureSource, FRAME_INTERVAL, WorkerEvent};
 use super::session::SessionPaths;
 
 const WORKER_POLL: Duration = Duration::from_millis(100);
@@ -44,6 +43,8 @@ struct Capture {
     frame_sender: Sender<FrameTask>,
     stopping: Arc<AtomicBool>,
     stats: Arc<QueueStats>,
+    expected_width: u32,
+    expected_height: u32,
     video_started: bool,
 }
 
@@ -65,6 +66,8 @@ impl GraphicsCaptureApiHandler for Capture {
             frame_sender: ctx.flags.frame_sender,
             stopping: ctx.flags.stopping,
             stats: ctx.flags.stats,
+            expected_width: ctx.flags.width,
+            expected_height: ctx.flags.height,
             video_started: false,
         })
     }
@@ -76,6 +79,18 @@ impl GraphicsCaptureApiHandler for Capture {
     ) -> Result<(), Self::Error> {
         if self.stopping.load(Ordering::Acquire) {
             return Ok(());
+        }
+
+        if frame.width() != self.expected_width || frame.height() != self.expected_height {
+            self.stopping.store(true, Ordering::Release);
+            return Err(anyhow!(
+                "capture dimensions changed from {} × {} to {} × {}",
+                self.expected_width,
+                self.expected_height,
+                frame.width(),
+                frame.height()
+            )
+            .into());
         }
 
         let accepted = EncoderPump::submit(&self.frame_sender, frame, &self.stats)
@@ -160,7 +175,7 @@ impl Drop for CaptureResources {
 }
 
 pub(crate) fn spawn_capture_worker(
-    monitor: Monitor,
+    source: CaptureSource,
     width: u32,
     height: u32,
     session: SessionPaths,
@@ -171,24 +186,26 @@ pub(crate) fn spawn_capture_worker(
     let fallback_events = event_sender.clone();
     let fallback_done = done_sender.clone();
     let fallback_session = session.clone();
+    let worker_session = session;
+    let thread_fallback_session = fallback_session.clone();
     let worker = thread::Builder::new()
         .name("capture-worker".to_string())
         .spawn(move || {
             let outcome = catch_unwind(AssertUnwindSafe(|| {
                 run_capture_worker(
-                    monitor,
+                    source,
                     width,
                     height,
-                    session.clone(),
+                    worker_session,
                     stop_receiver,
                     &event_sender,
                 )
             }))
             .unwrap_or_else(|_| Err("capture worker panicked".to_string()));
 
-            let (result, dropped_frames) = match outcome {
-                Ok(outcome) => (outcome.result, outcome.dropped_frames),
-                Err(error) => (Err(error), 0),
+            let (session, result, dropped_frames) = match outcome {
+                Ok(outcome) => (outcome.session, outcome.result, outcome.dropped_frames),
+                Err(error) => (thread_fallback_session, Err(error), 0),
             };
             let result = finish_session(&session, result, dropped_frames);
             let _ = event_sender.send(WorkerEvent::Finished(result));
@@ -207,18 +224,33 @@ pub(crate) fn spawn_capture_worker(
 }
 
 struct WorkerOutcome {
+    session: SessionPaths,
     result: Result<(), String>,
     dropped_frames: u64,
 }
 
 fn run_capture_worker(
-    monitor: Monitor,
+    source: CaptureSource,
     width: u32,
     height: u32,
-    session: SessionPaths,
+    mut session: SessionPaths,
     stop_receiver: Receiver<()>,
     event_sender: &Sender<WorkerEvent>,
 ) -> Result<WorkerOutcome, String> {
+    let capture_item = source.capture_item()?;
+    let (capture_width, capture_height) = capture_item.dimensions()?;
+    if (capture_width, capture_height) != (width, height) {
+        tracing::info!(
+            target: "recorder",
+            requested_width = width,
+            requested_height = height,
+            capture_width,
+            capture_height,
+            "using Windows Graphics Capture dimensions"
+        );
+    }
+    session.set_captured_dimensions(capture_width, capture_height);
+
     let clock = Arc::new(RecordingClock::new());
     let (start_sender, start_receiver) = mpsc::channel();
     let (frame_sender, frame_receiver) = super::encoder::channel();
@@ -226,8 +258,8 @@ fn run_capture_worker(
     let stopping = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(QueueStats::default());
     let flags = CaptureFlags {
-        width,
-        height,
+        width: capture_width,
+        height: capture_height,
         video_path: session.video_path().to_path_buf(),
         clock: clock.clone(),
         start_sender,
@@ -236,13 +268,21 @@ fn run_capture_worker(
         stopping: stopping.clone(),
         stats: stats.clone(),
     };
+    let draw_border = match source {
+        CaptureSource::Monitor(_) => DrawBorderSettings::Default,
+        CaptureSource::Window(_) => DrawBorderSettings::WithoutBorder,
+    };
+    let dirty_region = match source {
+        CaptureSource::Monitor(_) => DirtyRegionSettings::Default,
+        CaptureSource::Window(_) => DirtyRegionSettings::ReportAndRender,
+    };
     let settings = Settings::new(
-        monitor,
+        capture_item,
         CursorCaptureSettings::WithoutCursor,
-        DrawBorderSettings::Default,
+        draw_border,
         SecondaryWindowSettings::Default,
         MinimumUpdateIntervalSettings::Custom(FRAME_INTERVAL),
-        DirtyRegionSettings::Default,
+        dirty_region,
         ColorFormat::Bgra8,
         flags,
     );
@@ -254,7 +294,9 @@ fn run_capture_worker(
     let pump = EncoderPump::new(encoder, frame_receiver)?;
     resources.set_pump(pump);
     let cursor_tracker = CursorTracker::spawn(
-        monitor,
+        source,
+        capture_width,
+        capture_height,
         clock,
         start_receiver,
         session.telemetry_path().to_path_buf(),
@@ -274,6 +316,7 @@ fn run_capture_worker(
         result
     };
     Ok(WorkerOutcome {
+        session,
         result,
         dropped_frames: stats.dropped(),
     })
