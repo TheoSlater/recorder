@@ -132,8 +132,10 @@ fn classifies_translation_dominant_transform() {
 fn holds_mode_through_mixed_transform() {
     // Translation and scale contribute comparable motion, so neither dominates
     // and the previous mode is kept rather than flipping every frame.
+    // 0.02 of canvas travel against a 4% scale change: both contribute the
+    // same equivalent motion, so neither passes the dominance threshold.
     let previous = transform(0.5, 0.5, 0.5);
-    let current = transform(0.51, 0.5, 0.52);
+    let current = transform(0.52, 0.5, 0.52);
 
     assert_eq!(
         classify(previous, current, MotionBlurMode::Zoom).mode,
@@ -203,7 +205,10 @@ fn clamps_cursor_teleport() {
     };
     let sprite = motion.to_sprite(4000.0, 2000.0).expect("motion is large");
 
-    assert!((sprite.length() - 480.0).abs() < 1e-3, "{sprite:?}");
+    assert!(
+        (sprite.motion().length() - 480.0).abs() < 1e-3,
+        "{sprite:?}"
+    );
 }
 
 #[test]

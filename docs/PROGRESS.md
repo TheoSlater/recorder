@@ -292,7 +292,49 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 - Status errors render in the danger color while alerts keep surfacing
   details (`RecorderView::status_error`, `set_status`).
 
+### Motion blur
+
+- Velocity-based motion blur for the editor preview, owned by `motion_blur.rs`
+  and its `display`/`cursor`/`history` submodules. `MotionBlurDescriptor`
+  classifies each presented frame as `None`, `Movement`, or `Zoom` from the
+  inter-frame recording transform, with dead zones for still frames, a
+  dominance threshold plus previous-mode hysteresis for transforms that
+  translate and scale at once, and caps on the resulting UV extents.
+- Motion is measured against the last frame that actually reached the preview,
+  never against decoded frames that were dropped, coalesced, or cancelled.
+  History resets on a seek-generation change, an explicit reset (preview-rate
+  change, replay from the end, regenerated zoom regions), a backwards or
+  larger-than-250 ms media-time step, and cursor appearance/disappearance, so
+  the first frame after any discontinuity renders sharp.
+- Strength is corrected to a 60 FPS baseline from the real timestamp delta, so
+  a smear looks the same at 24, 30, and 60 FPS previews.
+- The reconstructed cursor is smeared by a true directional convolution
+  (`editor_canvas_cursor_blur.rs`): the sprite is resampled to its rendered
+  size once, accumulated along the motion vector in premultiplied BGRA, and
+  divided by the tap count. Tap spacing scales with the sprite so a long smear
+  cannot show duplicate cursor silhouettes, and the smeared sprite replaces the
+  sharp one rather than layering over it.
+- Transforms are read from the camera-free composition frame, so editor
+  viewport zoom and pan never produce motion blur.
+- One authored `Motion Blur` amount in the inspector (default 35%), persisted in
+  `.recproj` as schema version 5. `0%` bypasses the effect and its sampling
+  entirely.
+- `motion_blur_ms` and `blur_frames=<movement>/<zoom>` are reported in the
+  playback metrics line.
+
 ## Next
+
+- Land a composite motion-blur pass for the recording layer. The CPU half is
+  finished and tested (`MotionBlurDescriptor` carries `movement_uv`,
+  `zoom_center_uv`, and `zoom_amount`), but GPUI's scene has a closed set of
+  primitives and no custom-shader entry point, so the directional and radial
+  filters have nowhere to run. This wants the same upstream Windows GPUI
+  primitive work as external textures; do not approximate it with repeated
+  `paint_image` calls, which is the duplicate-sprite artifact the effect exists
+  to avoid.
+- Tune the motion-blur constants against real recordings: `CURSOR_MULTIPLIER`,
+  `DISPLAY_MULTIPLIER`, the movement/zoom dead zones, `MODE_DOMINANCE`, and the
+  480 px cursor motion clamp.
 
 - Resolve the in-flight `CaptureItem`/`Send` break around
   `start_free_threaded` in the capture worker (concurrent capture work, not UI).

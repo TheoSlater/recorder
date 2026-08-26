@@ -15,9 +15,9 @@ mod cursor;
 mod display;
 mod history;
 
-pub(crate) use cursor::{CursorMotion, CursorPoint, CursorSpriteMotion};
+pub(crate) use cursor::{CursorMotion, CursorPoint};
 pub(crate) use display::{RecordingTransform, compute_display_motion_blur};
-pub(crate) use history::{FrameSample, MotionBlurFrame, MotionBlurHistory};
+pub(crate) use history::{FrameSample, MotionBlurHistory};
 
 /// Preview baseline. A 60 FPS preview blurs at the authored strength; a slower
 /// preview covers more media time per frame, so its longer per-frame motion is
@@ -120,10 +120,6 @@ impl MotionBlurDescriptor {
             zoom_amount: 0.0,
             strength: 0.0,
         }
-    }
-
-    pub(crate) fn is_active(self) -> bool {
-        self.mode != MotionBlurMode::None
     }
 }
 

@@ -12,6 +12,7 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
             view.video_height,
             view.cursor_frame,
             view.cursor_images.clone(),
+            view.motion_blur.sprite(),
             view.project_settings.canvas,
             view.project_settings.canvas_composition.clone(),
             view.background_image.clone(),

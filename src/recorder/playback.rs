@@ -10,6 +10,8 @@ mod editor_canvas;
 mod editor_canvas_controls;
 #[path = "playback/editor_canvas_cursor.rs"]
 mod editor_canvas_cursor;
+#[path = "playback/editor_canvas_cursor_blur.rs"]
+mod editor_canvas_cursor_blur;
 #[path = "playback/editor_canvas_geometry.rs"]
 mod editor_canvas_geometry;
 #[path = "playback/editor_canvas_paint.rs"]
@@ -18,6 +20,10 @@ mod editor_canvas_paint;
 mod editor_cursor;
 #[path = "playback/editor_inspector.rs"]
 mod editor_inspector;
+#[path = "playback/editor_motion_blur.rs"]
+mod editor_motion_blur;
+#[path = "playback/editor_motion_state.rs"]
+mod editor_motion_state;
 #[path = "playback/editor_preview.rs"]
 mod editor_preview;
 #[path = "playback/editor_shell.rs"]
@@ -48,6 +54,7 @@ use super::{
     cursor_settings::{
         CURSOR_STYLE_LABELS, CursorSettings, MAX_CURSOR_SCALE, MIN_CURSOR_SCALE, cursor_assets,
     },
+    motion_blur::MotionBlurSettings,
     project_settings::ProjectSettings,
 };
 
@@ -162,6 +169,17 @@ fn cursor_controls(settings: &CursorSettings, window: &mut Window, cx: &mut App)
         cursor_smoothing_slider,
         cursor_style_select,
     )
+}
+
+/// The single authored motion-blur amount, shown as a percentage.
+fn motion_blur_control(settings: MotionBlurSettings, cx: &mut App) -> Entity<SliderState> {
+    cx.new(|_| {
+        SliderState::new()
+            .min(0.0)
+            .max(1.0)
+            .step(0.05)
+            .default_value(settings.amount)
+    })
 }
 
 fn load_cursor_images(cx: &App) -> Result<[Arc<RenderImage>; 2]> {

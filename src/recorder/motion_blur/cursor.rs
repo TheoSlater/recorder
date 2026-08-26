@@ -50,7 +50,11 @@ impl CursorMotion {
     ///
     /// Returns `None` when the result is too small to be worth smearing, which
     /// is what keeps a still or barely-moving cursor perfectly sharp.
-    pub(crate) fn to_sprite(self, layer_width: f32, layer_height: f32) -> Option<CursorSpriteMotion> {
+    pub(crate) fn to_sprite(
+        self,
+        layer_width: f32,
+        layer_height: f32,
+    ) -> Option<CursorSpriteMotion> {
         if !layer_width.is_finite() || !layer_height.is_finite() {
             return None;
         }
@@ -74,9 +78,5 @@ pub(crate) struct CursorSpriteMotion {
 impl CursorSpriteMotion {
     pub(crate) fn motion(self) -> Vec2 {
         self.motion
-    }
-
-    pub(crate) fn length(self) -> f32 {
-        self.motion.length()
     }
 }

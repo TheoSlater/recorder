@@ -8,7 +8,8 @@ fn composition_geometry_stays_centered_and_respects_padding() {
         Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0))),
         CanvasView::default(),
         &CanvasComposition::default(),
-        16.0 / 9.0,
+        1920,
+        1080,
         None,
         None,
     );
@@ -41,7 +42,8 @@ fn composition_geometry_follows_aspect_position_and_scale() {
         Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0))),
         CanvasView::default(),
         &composition,
-        16.0 / 9.0,
+        1920,
+        1080,
         None,
         None,
     );
@@ -63,7 +65,8 @@ fn hit_testing_stays_inside_export_canvas() {
         Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0))),
         CanvasView::default(),
         &composition,
-        16.0 / 9.0,
+        1920,
+        1080,
         None,
         None,
     );
@@ -91,7 +94,8 @@ fn zoom_transforms_the_recording_layer() {
         Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0))),
         CanvasView::default(),
         &CanvasComposition::default(),
-        16.0 / 9.0,
+        1920,
+        1080,
         None,
         None,
     );
@@ -99,7 +103,8 @@ fn zoom_transforms_the_recording_layer() {
         Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0))),
         CanvasView::default(),
         &CanvasComposition::default(),
-        16.0 / 9.0,
+        1920,
+        1080,
         Some(crate::recorder::zoom::ZoomEffect {
             scale: 2.0,
             target: crate::recorder::zoom::ZoomTarget::CanvasCenter,
@@ -123,4 +128,32 @@ fn zoom_transforms_the_recording_layer() {
             .abs()
             < 0.01
     );
+}
+
+#[test]
+fn recording_transform_ignores_editor_camera() {
+    let stage = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
+    let composition = CanvasComposition {
+        position_x: 0.1,
+        position_y: -0.05,
+        scale: 0.8,
+        ..CanvasComposition::default()
+    };
+    let framed = |view| preview_geometry(stage, view, &composition, 1920, 1080, None, None);
+
+    let resting = framed(CanvasView::default())
+        .recording_transform
+        .expect("canvas has area");
+    let navigated = framed(CanvasView {
+        zoom: 2.5,
+        pan_x: 120.0,
+        pan_y: -80.0,
+    })
+    .recording_transform
+    .expect("canvas has area");
+
+    assert!((resting.center.x - navigated.center.x).abs() < 1e-4);
+    assert!((resting.center.y - navigated.center.y).abs() < 1e-4);
+    assert!((resting.size.x - navigated.size.x).abs() < 1e-4);
+    assert!((resting.size.y - navigated.size.y).abs() < 1e-4);
 }

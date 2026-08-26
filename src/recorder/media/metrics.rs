@@ -6,6 +6,7 @@ use std::{
 
 use parking_lot::Mutex;
 
+use super::super::motion_blur::MotionBlurMode;
 use super::FrameTiming;
 
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
@@ -235,6 +236,22 @@ impl PlaybackMetrics {
         self.update(|state| state.cursor_update_times.push(duration));
     }
 
+    /// Time spent classifying motion and building the smeared cursor sprite for
+    /// one presented frame.
+    pub(crate) fn motion_blur_prepared(&self, duration: Duration) {
+        self.update(|state| state.motion_blur_times.push(duration));
+    }
+
+    /// Counts how each presented frame was classified, so blurred frames can be
+    /// compared against sharp ones in the same report.
+    pub(crate) fn motion_blur_classified(&self, mode: MotionBlurMode) {
+        self.update(|state| match mode {
+            MotionBlurMode::Movement => state.movement_blur_frames += 1,
+            MotionBlurMode::Zoom => state.zoom_blur_frames += 1,
+            MotionBlurMode::None => {}
+        });
+    }
+
     pub(crate) fn timeline_painted(&self, duration: Duration) {
         self.update(|state| state.timeline_paint_times.push(duration));
     }
@@ -336,6 +353,9 @@ struct State {
     worker_late_times: Vec<Duration>,
     cursor_paint_times: Vec<Duration>,
     cursor_update_times: Vec<Duration>,
+    motion_blur_times: Vec<Duration>,
+    movement_blur_frames: u64,
+    zoom_blur_frames: u64,
     timeline_paint_times: Vec<Duration>,
     seek_latencies: Vec<Duration>,
     scrub_pointer_to_seek_times: Vec<Duration>,
@@ -398,6 +418,9 @@ impl State {
             worker_late_times: Vec::new(),
             cursor_paint_times: Vec::new(),
             cursor_update_times: Vec::new(),
+            motion_blur_times: Vec::new(),
+            movement_blur_frames: 0,
+            zoom_blur_frames: 0,
             timeline_paint_times: Vec::new(),
             seek_latencies: Vec::new(),
             scrub_pointer_to_seek_times: Vec::new(),
@@ -486,6 +509,9 @@ impl State {
             worker_late_times: Summary::from(&mut self.worker_late_times),
             cursor_paint_times: Summary::from(&mut self.cursor_paint_times),
             cursor_update_times: Summary::from(&mut self.cursor_update_times),
+            motion_blur_times: Summary::from(&mut self.motion_blur_times),
+            movement_blur_frames: self.movement_blur_frames,
+            zoom_blur_frames: self.zoom_blur_frames,
             timeline_paint_times: Summary::from(&mut self.timeline_paint_times),
             seek_latencies: Summary::from(&mut self.seek_latencies),
             scrub_pointer_to_seek_times: Summary::from(&mut self.scrub_pointer_to_seek_times),
@@ -514,6 +540,8 @@ impl State {
         self.queue_dropped = 0;
         self.stale_events = 0;
         self.coalesced = 0;
+        self.movement_blur_frames = 0;
+        self.zoom_blur_frames = 0;
         self.paint_failures = 0;
         self.late = 0;
         self.worker_late = 0;
@@ -574,6 +602,9 @@ struct Report {
     worker_late_times: Summary,
     cursor_paint_times: Summary,
     cursor_update_times: Summary,
+    motion_blur_times: Summary,
+    movement_blur_frames: u64,
+    zoom_blur_frames: u64,
     timeline_paint_times: Summary,
     seek_latencies: Summary,
     scrub_pointer_to_seek_times: Summary,
@@ -624,7 +655,7 @@ fn log_report(report: Option<Report>) {
     let seconds = report.elapsed.as_secs_f64().max(f64::EPSILON);
     tracing::info!(
         target: "recorder::playback",
-        "playback metrics: decoded={:.1}/s presented={:.1}/s fps={:.1} dropped={} (clock={} queue={} coalesced={} stale={}) late={} worker_late={} paint_failures={} queue={:.2}/{} allocs={} render_images={} source_mb={:.1} bgra_mb={:.1} frame_ms={:.2}/{:.2}/{:.2}/{:.2} latency_ms={:.2}/{:.2}/{:.2}/{:.2} decode_ms={:.2}/{:.2}/{:.2}/{:.2} copy_ms={:.2}/{:.2}/{:.2}/{:.2} alloc_ms={:.2}/{:.2}/{:.2}/{:.2} convert_ms={:.2}/{:.2}/{:.2}/{:.2} image_ms={:.2}/{:.2}/{:.2}/{:.2} image_buffer_ms={:.2}/{:.2}/{:.2}/{:.2} render_image_ms={:.2}/{:.2}/{:.2}/{:.2} event_ms={:.2}/{:.2}/{:.2}/{:.2} pipeline_ms sample_buffer={:.2}/{:.2}/{:.2}/{:.2} buffer_convert={:.2}/{:.2}/{:.2}/{:.2} convert_image={:.2}/{:.2}/{:.2}/{:.2} ready_queue={:.2}/{:.2}/{:.2}/{:.2} ready_event={:.2}/{:.2}/{:.2}/{:.2} event_invalidate={:.2}/{:.2}/{:.2}/{:.2} ready_invalidate={:.2}/{:.2}/{:.2}/{:.2} invalidate_paint={:.2}/{:.2}/{:.2}/{:.2} update_ms={:.2}/{:.2}/{:.2}/{:.2} canvas_paint_ms={:.2}/{:.2}/{:.2}/{:.2} composition_paint_ms={:.2}/{:.2}/{:.2}/{:.2} image_submit_ms={:.2}/{:.2}/{:.2}/{:.2} release_ms={:.2}/{:.2}/{:.2}/{:.2} late_ms={:.2}/{:.2}/{:.2}/{:.2} worker_late_ms={:.2}/{:.2}/{:.2}/{:.2} cursor_paint_ms={:.2}/{:.2}/{:.2}/{:.2} cursor_update_ms={:.2}/{:.2}/{:.2}/{:.2} timeline_paint_ms={:.2}/{:.2}/{:.2}/{:.2} seek_ms={:.2}/{:.2}/{:.2}/{:.2} scrub_moves={} scrub_seeks={} pointer_seek_ms={:.2}/{:.2}/{:.2}/{:.2} seek_requests={} seek_replaced={} seek_skipped={} seek_cancelled={}",
+        "playback metrics: decoded={:.1}/s presented={:.1}/s fps={:.1} dropped={} (clock={} queue={} coalesced={} stale={}) late={} worker_late={} paint_failures={} queue={:.2}/{} allocs={} render_images={} source_mb={:.1} bgra_mb={:.1} frame_ms={:.2}/{:.2}/{:.2}/{:.2} latency_ms={:.2}/{:.2}/{:.2}/{:.2} decode_ms={:.2}/{:.2}/{:.2}/{:.2} copy_ms={:.2}/{:.2}/{:.2}/{:.2} alloc_ms={:.2}/{:.2}/{:.2}/{:.2} convert_ms={:.2}/{:.2}/{:.2}/{:.2} image_ms={:.2}/{:.2}/{:.2}/{:.2} image_buffer_ms={:.2}/{:.2}/{:.2}/{:.2} render_image_ms={:.2}/{:.2}/{:.2}/{:.2} event_ms={:.2}/{:.2}/{:.2}/{:.2} pipeline_ms sample_buffer={:.2}/{:.2}/{:.2}/{:.2} buffer_convert={:.2}/{:.2}/{:.2}/{:.2} convert_image={:.2}/{:.2}/{:.2}/{:.2} ready_queue={:.2}/{:.2}/{:.2}/{:.2} ready_event={:.2}/{:.2}/{:.2}/{:.2} event_invalidate={:.2}/{:.2}/{:.2}/{:.2} ready_invalidate={:.2}/{:.2}/{:.2}/{:.2} invalidate_paint={:.2}/{:.2}/{:.2}/{:.2} update_ms={:.2}/{:.2}/{:.2}/{:.2} canvas_paint_ms={:.2}/{:.2}/{:.2}/{:.2} composition_paint_ms={:.2}/{:.2}/{:.2}/{:.2} image_submit_ms={:.2}/{:.2}/{:.2}/{:.2} release_ms={:.2}/{:.2}/{:.2}/{:.2} late_ms={:.2}/{:.2}/{:.2}/{:.2} worker_late_ms={:.2}/{:.2}/{:.2}/{:.2} cursor_paint_ms={:.2}/{:.2}/{:.2}/{:.2} cursor_update_ms={:.2}/{:.2}/{:.2}/{:.2} motion_blur_ms={:.2}/{:.2}/{:.2}/{:.2} blur_frames={}/{} timeline_paint_ms={:.2}/{:.2}/{:.2}/{:.2} seek_ms={:.2}/{:.2}/{:.2}/{:.2} scrub_moves={} scrub_seeks={} pointer_seek_ms={:.2}/{:.2}/{:.2}/{:.2} seek_requests={} seek_replaced={} seek_skipped={} seek_cancelled={}",
         report.decoded as f64 / seconds,
         report.presented as f64 / seconds,
         report.fps,
@@ -750,6 +781,12 @@ fn log_report(report: Option<Report>) {
         report.cursor_update_times.p95,
         report.cursor_update_times.p99,
         report.cursor_update_times.worst,
+        report.motion_blur_times.p50,
+        report.motion_blur_times.p95,
+        report.motion_blur_times.p99,
+        report.motion_blur_times.worst,
+        report.movement_blur_frames,
+        report.zoom_blur_frames,
         report.timeline_paint_times.p50,
         report.timeline_paint_times.p95,
         report.timeline_paint_times.p99,

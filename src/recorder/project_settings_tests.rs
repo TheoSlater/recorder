@@ -66,7 +66,7 @@ fn saves_and_loads_cursor_settings() {
     save(&path, &settings).unwrap();
 
     let loaded = load(&path);
-    assert_eq!(loaded.schema_version, 4);
+    assert_eq!(loaded.schema_version, 5);
     assert_eq!(loaded.cursor.scale, MAX_CURSOR_SCALE);
     assert_eq!(loaded.cursor.style, CursorStyle::Circle);
     assert_eq!(
@@ -149,4 +149,34 @@ fn normalizes_canvas_composition() {
         Some("#AABBCC")
     );
     assert_eq!(composition.background.image_path, None);
+}
+
+#[test]
+fn saves_and_normalizes_motion_blur() {
+    let root = std::env::temp_dir().join(format!(
+        "recorder-motion-blur-settings-{}",
+        std::process::id()
+    ));
+    let path = root.join("project.json");
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+
+    let mut settings = ProjectSettings::default();
+    settings.motion_blur.amount = 0.6;
+    save(&path, &settings).unwrap();
+    assert_eq!(load(&path).motion_blur.amount, 0.6);
+
+    settings.motion_blur.amount = 4.0;
+    save(&path, &settings).unwrap();
+    assert_eq!(load(&path).motion_blur.amount, 1.0);
+
+    // A project written before motion blur existed keeps playing, and picks up
+    // the subtle default rather than an unset value.
+    fs::write(&path, br#"{"schema_version":4}"#).unwrap();
+    assert_eq!(
+        load(&path).motion_blur.amount,
+        ProjectSettings::default().motion_blur.amount
+    );
+
+    let _ = fs::remove_dir_all(&root);
 }

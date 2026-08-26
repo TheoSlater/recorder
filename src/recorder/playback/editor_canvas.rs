@@ -8,6 +8,7 @@ use super::super::{
     project_settings::{CanvasComposition, CanvasView},
     zoom::ZoomEffect,
 };
+use super::editor_canvas_cursor_blur::BlurredCursor;
 
 pub(super) type CanvasBounds = Rc<RefCell<Option<Bounds<Pixels>>>>;
 
@@ -18,6 +19,7 @@ pub(super) struct Canvas {
     video_height: u32,
     cursor: Option<CursorFrame>,
     cursor_images: [Arc<RenderImage>; 2],
+    blurred_cursor: Option<BlurredCursor>,
     canvas_view: CanvasView,
     composition: CanvasComposition,
     background_image: Option<Arc<RenderImage>>,
@@ -43,6 +45,7 @@ impl Canvas {
         video_height: u32,
         cursor: Option<CursorFrame>,
         cursor_images: [Arc<RenderImage>; 2],
+        blurred_cursor: Option<BlurredCursor>,
         canvas_view: CanvasView,
         composition: CanvasComposition,
         background_image: Option<Arc<RenderImage>>,
@@ -66,6 +69,7 @@ impl Canvas {
             video_height,
             cursor,
             cursor_images,
+            blurred_cursor,
             canvas_view,
             composition,
             background_image,
@@ -147,6 +151,7 @@ impl Element for Canvas {
         let image = self.image.clone();
         let cursor = self.cursor;
         let cursor_images = self.cursor_images.clone();
+        let blurred_cursor = self.blurred_cursor.clone();
         let canvas_view = self.canvas_view;
         let composition = self.composition.clone();
         let background_image = self.background_image.clone();
@@ -184,6 +189,7 @@ impl Element for Canvas {
                             video_height,
                             cursor,
                             cursor_images,
+                            blurred_cursor,
                             canvas_view,
                             composition,
                             background_image,

@@ -17,9 +17,16 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         .outline()
         .compact()
         .with_size(Size::Small)
-        .label("Export")
-        .disabled(true)
-        .tooltip("Export is not available yet");
+        .label(view.export_label())
+        .disabled(!view.export_available() && !view.exporting())
+        .tooltip(if view.exporting() {
+            "Cancel export"
+        } else {
+            "Export edited recording"
+        })
+        .on_click(cx.listener(|view, _, window, cx| {
+            view.export_or_cancel(window, cx);
+        }));
     let preview_rates = h_flex()
         .items_center()
         .gap_1()

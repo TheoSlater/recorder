@@ -1,9 +1,11 @@
 use gpui::*;
 
 use super::super::{
+    composition::{self, CompositionFrame, NormalizedRect, OutputSize, SourceSize},
     cursor::CursorFrame,
+    motion_blur::{RecordingTransform, Vec2},
     project_settings::{CanvasComposition, CanvasView},
-    zoom::{ZoomEffect, ZoomTarget},
+    zoom::ZoomEffect,
 };
 
 const DEFAULT_VIDEO_ASPECT: f32 = 16. / 9.;
@@ -19,6 +21,12 @@ pub(super) struct CanvasGeometry {
     pub(super) composition_layer: Bounds<Pixels>,
     pub(super) composition_radius: Pixels,
     pub(super) resize_handle: Bounds<Pixels>,
+    pub(super) composition_frame: CompositionFrame,
+    /// The recording layer in output-normalized units, which is what motion
+    /// blur measures so editor navigation cannot register as movement.
+    pub(super) recording_transform: Option<RecordingTransform>,
+    /// Focal point the active zoom is pulling towards, in layer UV space.
+    pub(super) zoom_focus: Vec2,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,7 +39,8 @@ pub(super) fn preview_geometry(
     stage: Bounds<Pixels>,
     canvas_view: CanvasView,
     composition: &CanvasComposition,
-    video_aspect: f32,
+    video_width: u32,
+    video_height: u32,
     zoom_effect: Option<ZoomEffect>,
     cursor: Option<CursorFrame>,
 ) -> CanvasGeometry {
@@ -39,8 +48,18 @@ pub(super) fn preview_geometry(
         fit_canvas(stage, composition.aspect_ratio.ratio()),
         canvas_view,
     );
-    let recording_layer = recording_bounds(canvas, video_aspect, composition);
-    let composition_layer = transform_layer(recording_layer, zoom_effect, cursor);
+    let source = SourceSize {
+        width: video_width,
+        height: video_height,
+    };
+    let output = OutputSize {
+        width: (canvas.size.width.as_f32().max(1.0) * 1_000.0).round() as u32,
+        height: (canvas.size.height.as_f32().max(1.0) * 1_000.0).round() as u32,
+    };
+    let composition_frame =
+        composition::evaluate_with_aspect(composition, source, output, zoom_effect, cursor);
+    let recording_layer = normalized_bounds(canvas, composition_frame.base_recording);
+    let composition_layer = normalized_bounds(canvas, composition_frame.recording);
     let composition_radius = layer_radius(composition_layer, composition.corner_radius);
     let resize_handle = resize_handle(composition_layer);
 
@@ -50,7 +69,37 @@ pub(super) fn preview_geometry(
         composition_layer,
         composition_radius,
         resize_handle,
+        composition_frame,
+        recording_transform: RecordingTransform::new(
+            Vec2::new(
+                (composition_frame.recording.x + composition_frame.recording.width / 2.0) as f32,
+                (composition_frame.recording.y + composition_frame.recording.height / 2.0) as f32,
+            ),
+            Vec2::new(
+                composition_frame.recording.width as f32,
+                composition_frame.recording.height as f32,
+            ),
+        ),
+        zoom_focus: Vec2::new(
+            composition_frame.zoom_focus.0 as f32,
+            composition_frame.zoom_focus.1 as f32,
+        ),
     }
+}
+
+/// Places an output-normalized rect onto the on-screen canvas, which is where
+/// the editor camera is applied.
+fn normalized_bounds(canvas: Bounds<Pixels>, rect: NormalizedRect) -> Bounds<Pixels> {
+    Bounds::new(
+        point(
+            px(canvas.origin.x.as_f32() + rect.x as f32 * canvas.size.width.as_f32()),
+            px(canvas.origin.y.as_f32() + rect.y as f32 * canvas.size.height.as_f32()),
+        ),
+        size(
+            px(rect.width as f32 * canvas.size.width.as_f32()),
+            px(rect.height as f32 * canvas.size.height.as_f32()),
+        ),
+    )
 }
 
 pub(super) fn hit_test(geometry: CanvasGeometry, position: Point<Pixels>) -> Option<CanvasHit> {
@@ -87,45 +136,6 @@ fn fit_canvas(stage: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
     let width = stage_width.min(stage_height * aspect);
     let height = width / aspect;
     centered_bounds(stage.center(), width, height)
-}
-
-fn recording_bounds(
-    canvas: Bounds<Pixels>,
-    video_aspect: f32,
-    composition: &CanvasComposition,
-) -> Bounds<Pixels> {
-    let padding = composition.padding as f32;
-    let available = Bounds::new(
-        point(
-            px(canvas.origin.x.as_f32() + canvas.size.width.as_f32() * padding),
-            px(canvas.origin.y.as_f32() + canvas.size.height.as_f32() * padding),
-        ),
-        size(
-            px(canvas.size.width.as_f32() * (1.0 - padding * 2.0)),
-            px(canvas.size.height.as_f32() * (1.0 - padding * 2.0)),
-        ),
-    );
-    let contained = contain_bounds(available, video_aspect);
-    let scale = composition.scale as f32;
-    let width = contained.size.width.as_f32() * scale;
-    let height = contained.size.height.as_f32() * scale;
-    let center = point(
-        px(canvas.center().x.as_f32() + composition.position_x as f32 * canvas.size.width.as_f32()),
-        px(canvas.center().y.as_f32()
-            + composition.position_y as f32 * canvas.size.height.as_f32()),
-    );
-    centered_bounds(center, width, height)
-}
-
-fn contain_bounds(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
-    let aspect = safe_aspect(aspect);
-    let mut width = bounds.size.width.as_f32().max(0.0);
-    let mut height = width / aspect;
-    if height > bounds.size.height.as_f32() {
-        height = bounds.size.height.as_f32().max(0.0);
-        width = height * aspect;
-    }
-    centered_bounds(bounds.center(), width, height)
 }
 
 fn centered_bounds(center: Point<Pixels>, width: f32, height: f32) -> Bounds<Pixels> {
@@ -171,37 +181,6 @@ fn layer_radius(layer: Bounds<Pixels>, normalized_radius: f64) -> Pixels {
     px((shortest * normalized_radius as f32)
         .min(shortest / 2.0)
         .max(0.0))
-}
-
-fn transform_layer(
-    layer: Bounds<Pixels>,
-    effect: Option<ZoomEffect>,
-    cursor: Option<CursorFrame>,
-) -> Bounds<Pixels> {
-    let Some(effect) = effect else {
-        return layer;
-    };
-    let scale = effect.scale.max(1.0);
-    let (target_x, target_y) = match effect.target {
-        ZoomTarget::Cursor => cursor
-            .filter(|cursor| cursor.x.is_finite() && cursor.y.is_finite())
-            .map(|cursor| (cursor.x.clamp(0.0, 1.0), cursor.y.clamp(0.0, 1.0)))
-            .unwrap_or((0.5, 0.5)),
-        ZoomTarget::CanvasCenter | ZoomTarget::Invalid => (0.5, 0.5),
-    };
-    let width = layer.size.width.as_f32() * scale;
-    let height = layer.size.height.as_f32() * scale;
-    let target = point(
-        px(layer.origin.x.as_f32() + target_x * layer.size.width.as_f32()),
-        px(layer.origin.y.as_f32() + target_y * layer.size.height.as_f32()),
-    );
-    Bounds::new(
-        point(
-            px(target.x.as_f32() - target_x * width),
-            px(target.y.as_f32() - target_y * height),
-        ),
-        size(px(width), px(height)),
-    )
 }
 
 fn safe_aspect(aspect: f32) -> f32 {

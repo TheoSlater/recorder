@@ -1,7 +1,7 @@
 use gpui::*;
 use gpui_component::{ActiveTheme as _, scroll::ScrollableElement as _, v_flex};
 
-use super::{PlaybackView, editor_canvas_controls, editor_cursor, editor_zoom};
+use super::{PlaybackView, editor_canvas_controls, editor_cursor, editor_motion_blur, editor_zoom};
 
 pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> impl IntoElement {
     let border = cx.theme().border;
@@ -24,6 +24,7 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         )
         .child(editor_zoom::render(view, cx))
         .child(editor_cursor::render(view, cx))
+        .child(editor_motion_blur::render(view, cx))
         .child(editor_canvas_controls::render(view, cx))
         .child(render_section("Video", border, muted_foreground))
 }

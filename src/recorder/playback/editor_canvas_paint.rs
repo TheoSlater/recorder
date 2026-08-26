@@ -4,12 +4,16 @@ use std::time::Duration;
 use gpui::*;
 
 use super::super::{
+    composition::SourceSize,
     cursor::CursorFrame,
     media::{FrameTiming, PlaybackMetrics},
     project_settings::{CanvasBackgroundKind, CanvasComposition, CanvasView},
     zoom::ZoomEffect,
 };
-use super::{editor_canvas_controls::setting_color, editor_canvas_cursor, editor_canvas_geometry};
+use super::{
+    editor_canvas_controls::setting_color, editor_canvas_cursor,
+    editor_canvas_cursor_blur::BlurredCursor, editor_canvas_geometry,
+};
 
 const CANVAS_RADIUS: Pixels = px(20.);
 
@@ -28,6 +32,7 @@ pub(super) fn paint_preview(
     video_height: u32,
     cursor: Option<CursorFrame>,
     cursor_images: [Arc<RenderImage>; 2],
+    blurred_cursor: Option<BlurredCursor>,
     canvas_view: CanvasView,
     composition: CanvasComposition,
     background_image: Option<Arc<RenderImage>>,
@@ -47,16 +52,12 @@ pub(super) fn paint_preview(
     // The stage is editor chrome and is never part of the exported video.
     window.paint_quad(fill(stage, stage_background));
 
-    let video_aspect = if video_width > 0 && video_height > 0 {
-        video_width as f32 / video_height as f32
-    } else {
-        16. / 9.
-    };
     let geometry = editor_canvas_geometry::preview_geometry(
         stage,
         canvas_view,
         &composition,
-        video_aspect,
+        video_width,
+        video_height,
         zoom_effect,
         cursor,
     );
@@ -126,11 +127,14 @@ pub(super) fn paint_preview(
                 window,
                 canvas,
                 composition_layer,
+                geometry.composition_frame,
                 geometry.composition_radius,
                 image,
                 video_width,
+                video_height,
                 cursor,
                 cursor_images,
+                blurred_cursor.as_ref(),
                 shadow,
                 composition.shadow,
                 selection,
@@ -183,11 +187,14 @@ fn paint_screen_recording_layer(
     window: &mut Window,
     canvas: Bounds<Pixels>,
     composition_layer: Bounds<Pixels>,
+    composition_frame: super::super::composition::CompositionFrame,
     radius: Pixels,
     image: Option<Arc<RenderImage>>,
     video_width: u32,
+    video_height: u32,
     cursor: Option<CursorFrame>,
     cursor_images: [Arc<RenderImage>; 2],
+    blurred_cursor: Option<&BlurredCursor>,
     shadow: Hsla,
     has_shadow: bool,
     selection: Hsla,
@@ -220,11 +227,15 @@ fn paint_screen_recording_layer(
         editor_canvas_cursor::paint(
             window,
             canvas,
-            composition_layer,
+            composition_frame,
             CANVAS_RADIUS,
             cursor,
             cursor_images,
-            video_width,
+            blurred_cursor,
+            SourceSize {
+                width: video_width,
+                height: video_height,
+            },
             &metrics,
         );
 

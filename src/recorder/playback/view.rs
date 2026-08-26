@@ -31,8 +31,11 @@ use super::super::{
         MIN_ZOOM_REGION_DURATION_US, ZoomRegion, ZoomTarget, cursor_scale_at,
     },
 };
+use super::super::export::{self, ExportEvent, ExportRequest};
 use super::{
-    editor_canvas, editor_canvas_controls, editor_canvas_geometry, editor_shell, editor_timeline,
+    editor_canvas, editor_canvas_controls, editor_canvas_geometry,
+    editor_motion_state::{MotionBlurState, PresentedFrame},
+    editor_shell, editor_timeline,
     preview_rate::PreviewRate,
 };
 
@@ -63,18 +66,23 @@ enum CanvasColor {
 pub(crate) struct PlaybackView {
     pub(super) player: Option<NativePlayer>,
     time_events: Option<Receiver<PlaybackEvent>>,
+    pub(super) video_path: PathBuf,
+    pub(super) telemetry_path: PathBuf,
+    pub(super) metadata_path: PathBuf,
     pub(super) project_settings: ProjectSettings,
     generate_auto_zooms_on_open: bool,
     auto_zooms_generated: bool,
     pub(super) cursor_size_slider: Entity<SliderState>,
     pub(super) cursor_smoothing_slider: Entity<SliderState>,
     pub(super) cursor_style_select: Entity<SelectState<Vec<&'static str>>>,
+    pub(super) motion_blur_slider: Entity<SliderState>,
     pub(super) canvas_controls: editor_canvas_controls::CanvasControls,
     subscriptions: Vec<Subscription>,
     pub(super) cursor_overlay: CursorOverlay,
     cursor_overlay_loading: bool,
     pub(super) cursor_frame: Option<super::super::cursor::CursorFrame>,
     pub(super) cursor_images: [Arc<RenderImage>; 2],
+    pub(super) motion_blur: MotionBlurState,
     pub(super) image: Option<Arc<RenderImage>>,
     pub(super) video_width: u32,
     pub(super) video_height: u32,
@@ -111,6 +119,14 @@ pub(crate) struct PlaybackView {
     latest_seek_generation: u64,
     last_published_seek_us: Option<u64>,
     pending_image_releases: Vec<Arc<RenderImage>>,
+    pub(super) export_state: Option<ExportState>,
+    export_task: Option<Task<()>>,
+}
+
+pub(super) struct ExportState {
+    pub(super) cancel: Arc<std::sync::atomic::AtomicBool>,
+    pub(super) completed: u64,
+    pub(super) total: u64,
 }
 
 impl PlaybackView {
@@ -122,9 +138,11 @@ impl PlaybackView {
         window: &mut Window,
         cx: &mut App,
     ) -> Result<Self> {
+        let video_path_for_state = video_path.clone();
         let project_settings = project_settings.normalized();
         let (cursor_size_slider, cursor_smoothing_slider, cursor_style_select) =
             super::cursor_controls(&project_settings.cursor, window, cx);
+        let motion_blur_slider = super::motion_blur_control(project_settings.motion_blur, cx);
         let pending_alerts = AlertQueue::default();
         let canvas_controls = editor_canvas_controls::CanvasControls::new(
             &project_settings.canvas_composition,
@@ -138,18 +156,23 @@ impl PlaybackView {
         Ok(Self {
             player: Some(player),
             time_events: Some(time_events),
+            video_path: video_path_for_state,
+            telemetry_path: PathBuf::new(),
+            metadata_path: PathBuf::new(),
             project_settings,
             generate_auto_zooms_on_open,
             auto_zooms_generated: false,
             cursor_size_slider,
             cursor_smoothing_slider,
             cursor_style_select,
+            motion_blur_slider,
             canvas_controls,
             subscriptions: Vec::new(),
             cursor_overlay: CursorOverlay::loading(),
             cursor_overlay_loading: true,
             cursor_frame: None,
             cursor_images,
+            motion_blur: MotionBlurState::default(),
             image: None,
             video_width: 0,
             video_height: 0,
@@ -186,6 +209,8 @@ impl PlaybackView {
             latest_seek_generation: 0,
             last_published_seek_us: None,
             pending_image_releases: Vec::new(),
+            export_state: None,
+            export_task: None,
         })
     }
 
@@ -200,6 +225,7 @@ impl PlaybackView {
         let error: SharedString = error.into();
         let (cursor_size_slider, cursor_smoothing_slider, cursor_style_select) =
             super::cursor_controls(&project_settings.cursor, window, cx);
+        let motion_blur_slider = super::motion_blur_control(project_settings.motion_blur, cx);
         let canvas_controls = editor_canvas_controls::CanvasControls::new(
             &project_settings.canvas_composition,
             window,
@@ -211,18 +237,23 @@ impl PlaybackView {
         Self {
             player: None,
             time_events: None,
+            video_path: PathBuf::new(),
+            telemetry_path: PathBuf::new(),
+            metadata_path: PathBuf::new(),
             project_settings,
             generate_auto_zooms_on_open: false,
             auto_zooms_generated: false,
             cursor_size_slider,
             cursor_smoothing_slider,
             cursor_style_select,
+            motion_blur_slider,
             canvas_controls,
             subscriptions: Vec::new(),
             cursor_overlay: CursorOverlay::disabled("Cursor overlay unavailable"),
             cursor_overlay_loading: false,
             cursor_frame: None,
             cursor_images,
+            motion_blur: MotionBlurState::default(),
             image: None,
             video_width: 0,
             video_height: 0,
@@ -263,6 +294,8 @@ impl PlaybackView {
             latest_seek_generation: 0,
             last_published_seek_us: None,
             pending_image_releases: Vec::new(),
+            export_state: None,
+            export_task: None,
         }
     }
 
@@ -272,6 +305,8 @@ impl PlaybackView {
         metadata_path: PathBuf,
         cx: &mut Context<Self>,
     ) {
+        self.telemetry_path = telemetry_path.clone();
+        self.metadata_path = metadata_path.clone();
         if self.project_settings.canvas_composition.background.kind == CanvasBackgroundKind::Image {
             self.start_background_image_load(
                 self.project_settings
@@ -367,6 +402,133 @@ impl PlaybackView {
         .detach();
     }
 
+    pub(super) fn export_or_cancel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(state) = &self.export_state {
+            state
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+            return;
+        }
+        if self.player.is_none() {
+            return;
+        }
+
+        let suggested = self
+            .video_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(format!(
+                "{}-export.mp4",
+                self.video_path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .unwrap_or("recording")
+            ));
+        let output = match export::choose_output_path(&suggested.to_string_lossy()) {
+            Ok(Some(path)) => path,
+            Ok(None) => return,
+            Err(error) => {
+                self.report_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let request = ExportRequest {
+            video_path: self.video_path.clone(),
+            telemetry_path: self.telemetry_path.clone(),
+            metadata_path: self.metadata_path.clone(),
+            settings: self.project_settings.clone(),
+        };
+        let handle = match export::start(request, output) {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.report_error(error.to_string(), cx);
+                return;
+            }
+        };
+        let events = handle.events.clone();
+        self.export_state = Some(ExportState {
+            cancel: handle.cancel,
+            completed: 0,
+            total: 0,
+        });
+        let view = cx.entity().downgrade();
+        self.export_task = Some(cx.spawn(async move |_, cx| {
+            loop {
+                let events_for_wait = events.clone();
+                let event = cx
+                    .background_spawn(async move { events_for_wait.recv().ok() })
+                    .await;
+                let Some(event) = event else {
+                    break;
+                };
+                let mut latest = event;
+                for event in events.try_iter() {
+                    latest = event;
+                }
+                let terminal = matches!(
+                    latest,
+                    ExportEvent::Finished(_) | ExportEvent::Cancelled | ExportEvent::Error(_)
+                );
+                if view
+                    .update(cx, |view, cx| view.apply_export_event(latest, cx))
+                    .is_err()
+                {
+                    break;
+                }
+                if terminal {
+                    break;
+                }
+            }
+        }));
+        cx.notify();
+    }
+
+    pub(super) fn export_available(&self) -> bool {
+        self.player.is_some() && self.export_state.is_none()
+    }
+
+    pub(super) fn export_label(&self) -> String {
+        let Some(state) = &self.export_state else {
+            return "Export".to_string();
+        };
+        if state.total == 0 {
+            "Exporting…".to_string()
+        } else {
+            format!(
+                "Exporting {:.0}%",
+                state.completed as f64 / state.total as f64 * 100.0
+            )
+        }
+    }
+
+    pub(super) fn exporting(&self) -> bool {
+        self.export_state.is_some()
+    }
+
+    fn apply_export_event(&mut self, event: ExportEvent, cx: &mut Context<Self>) {
+        match event {
+            ExportEvent::Progress { completed, total } => {
+                if let Some(state) = &mut self.export_state {
+                    state.completed = completed;
+                    state.total = total;
+                }
+            }
+            ExportEvent::Finished(path) => {
+                tracing::info!(target: "recorder::export", path = %path.display(), "export completed");
+                self.export_state = None;
+            }
+            ExportEvent::Cancelled => {
+                self.export_state = None;
+                self.report_warning("Export cancelled.", cx);
+            }
+            ExportEvent::Error(error) => {
+                self.export_state = None;
+                self.report_error(format!("Export failed: {error}"), cx);
+            }
+        }
+        cx.notify();
+    }
+
     pub(super) fn subscribe_cursor_controls(&mut self, cx: &mut Context<Self>) {
         let size_slider = self.cursor_size_slider.clone();
         self.subscriptions.push(
@@ -390,6 +552,17 @@ impl PlaybackView {
                 let mut settings = view.project_settings.cursor;
                 settings.smoothing = value.start();
                 view.set_cursor_settings(settings, cx);
+            },
+        ));
+
+        let motion_blur_slider = self.motion_blur_slider.clone();
+        self.subscriptions.push(cx.subscribe(
+            &motion_blur_slider,
+            |view, _, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event else {
+                    return;
+                };
+                view.set_motion_blur_amount(value.start(), cx);
             },
         ));
 
@@ -504,16 +677,15 @@ impl PlaybackView {
 
     fn canvas_geometry(&self) -> Option<editor_canvas_geometry::CanvasGeometry> {
         let stage = (*self.canvas_bounds.borrow())?;
-        let video_aspect = if self.video_width > 0 && self.video_height > 0 {
-            self.video_width as f32 / self.video_height as f32
-        } else {
+        if self.video_width == 0 || self.video_height == 0 {
             return None;
-        };
+        }
         Some(editor_canvas_geometry::preview_geometry(
             stage,
             self.project_settings.canvas,
             &self.project_settings.canvas_composition,
-            video_aspect,
+            self.video_width,
+            self.video_height,
             super::super::zoom::effect_at(
                 &self.project_settings.zoom_regions,
                 self.timeline.playhead_us,
@@ -854,6 +1026,7 @@ impl PlaybackView {
                     let display_seconds = self.display_seconds_for_frame(seconds);
                     self.timeline.set_playhead_seconds(display_seconds);
                     self.update_cursor(display_seconds);
+                    self.update_motion_blur(display_seconds);
                     self.frame_timing = Some(timing.clone());
                     let invalidated_at = Instant::now();
                     self.frame_invalidated_at = Some(invalidated_at);
@@ -905,6 +1078,47 @@ impl PlaybackView {
         self.metrics.cursor_updated(started.elapsed());
     }
 
+    fn update_motion_blur(&mut self, seconds: f64) {
+        let started = Instant::now();
+        let released = self.motion_blur.present(PresentedFrame {
+            seconds,
+            seek_generation: self.latest_seek_generation,
+            cursor: self.cursor_frame,
+            geometry: self.canvas_geometry(),
+            video_width: self.video_width,
+            video_height: self.video_height,
+            cursor_images: &self.cursor_images,
+            settings: self.project_settings.motion_blur,
+        });
+        self.release_image(released);
+        self.metrics
+            .motion_blur_classified(self.motion_blur.display().mode);
+        self.metrics.motion_blur_prepared(started.elapsed());
+    }
+
+    fn reset_motion_blur(&mut self) {
+        let released = self.motion_blur.reset();
+        self.release_image(released);
+    }
+
+    /// Queues an image for release from this window during its next render
+    /// pass, the same path the video frame uses.
+    fn release_image(&mut self, image: Option<Arc<RenderImage>>) {
+        if let Some(image) = image {
+            self.pending_image_releases.push(image);
+        }
+    }
+
+    pub(super) fn set_motion_blur_amount(&mut self, amount: f32, cx: &mut Context<Self>) {
+        self.project_settings.motion_blur.amount = amount;
+        self.project_settings.motion_blur = self.project_settings.motion_blur.normalized();
+        if self.project_settings.motion_blur.is_disabled() {
+            self.reset_motion_blur();
+        }
+        self.persist_settings(cx);
+        cx.notify();
+    }
+
     pub(super) fn set_cursor_settings(&mut self, settings: CursorSettings, cx: &mut Context<Self>) {
         self.project_settings.cursor = settings.normalized();
         self.persist_settings(cx);
@@ -941,6 +1155,7 @@ impl PlaybackView {
                 self.frame_timing = None;
                 self.frame_invalidated_at = None;
                 self.last_preview_slot = None;
+                self.reset_motion_blur();
                 self.metrics.reset_presented();
             }
             self.player
@@ -1706,6 +1921,9 @@ impl PlaybackView {
         }
 
         self.project_settings.zoom_regions.extend(generated);
+        // New regions replace the composition transform discontinuously, so the
+        // pending measurement no longer describes the layer that is on screen.
+        self.reset_motion_blur();
         self.selected_zoom_region = Some(existing_count);
         self.selected_cursor_size_region = None;
         self.hovered_cursor_size_hit = None;
@@ -1943,6 +2161,9 @@ impl PlaybackView {
         }
         self.preview_rate = rate;
         self.last_preview_slot = None;
+        // A new preview rate changes the media-time step between presented
+        // frames, so the pending measurement no longer describes this cadence.
+        self.reset_motion_blur();
         self.metrics.reset_presented();
         cx.notify();
     }
@@ -2088,6 +2309,7 @@ fn distance(left: Point<Pixels>, right: Point<Pixels>) -> f32 {
 impl Render for PlaybackView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let metrics = self.metrics.clone();
+        self.motion_blur.set_scale_factor(window.scale_factor());
         for image in self.pending_image_releases.drain(..) {
             let release_started = Instant::now();
             let _ = window.drop_image(image);
