@@ -94,10 +94,17 @@ fn exports_a_recording() {
         match event {
             ExportEvent::Progress { completed, .. } => progressed = completed,
             ExportEvent::Finished(path) => {
-                let written = std::fs::metadata(&path).expect("the export exists").len();
-                assert!(written > 0, "the export is empty");
-                assert!(progressed > 0, "no frames were composed");
+                let written = std::fs::read(&path).expect("the export exists");
                 let _ = std::fs::remove_file(&path);
+                assert!(progressed > 0, "no frames were composed");
+                // An MP4 opens with a file-type box, so a truncated or
+                // header-only write is caught rather than passing on length.
+                assert_eq!(&written[4..8], b"ftyp", "not an MP4");
+                assert!(
+                    written.len() > 64 * 1024,
+                    "the export is {} bytes for {progressed} frames",
+                    written.len()
+                );
                 return;
             }
             ExportEvent::Cancelled => panic!("the export cancelled itself"),

@@ -2271,7 +2271,11 @@ impl PlaybackView {
     }
 
     pub(super) fn preview_fps(&self) -> f32 {
-        self.metrics.presented_fps()
+        if self.native_preview.composing() {
+            self.native_preview.presented_fps()
+        } else {
+            self.metrics.presented_fps()
+        }
     }
 
     pub(super) fn preview_rate(&self) -> PreviewRate {

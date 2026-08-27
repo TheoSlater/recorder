@@ -28,6 +28,14 @@
 //! 2. `gpui_component::Root`, which paints its own themed fill.
 //! 3. The editor's own shell and preview backgrounds.
 //!
+//! Clearing the shell's fill has a consequence worth stating, because it is
+//! easy to reintroduce: **every editor row outside the preview must paint its
+//! own opaque background.** The shell cannot paint one for them — its fill
+//! would cover the preview too — so a row that relied on the shell, or a
+//! translucent element that relied on an opaque backdrop, becomes a hole
+//! through to the desktop. The toolbar, inspector, transport, and timeline each
+//! carry their own fill for this reason.
+//!
 //! The legacy GPUI preview stays selectable behind
 //! [`available_backend`](super::super::rendering::available_backend) until the
 //! native path has been validated through zoom, seeking, resizing, performance,
@@ -215,6 +223,13 @@ impl NativePreview {
         self.composing
     }
 
+    /// Presented frames per second, for the editor's readout. GPUI's own
+    /// presented-frame metric counts image paints, which the native path
+    /// deliberately no longer performs.
+    pub(super) fn presented_fps(&self) -> f32 {
+        self.counters.fps
+    }
+
     /// A background that disappears once the native surface owns the
     /// composition, so nothing opaque is left covering it.
     pub(super) fn background(&self, color: Hsla) -> Hsla {
@@ -236,6 +251,10 @@ struct Counters {
     /// Time spent composing and presenting, which is the compositor's share of
     /// the editor's frame budget.
     spent: std::time::Duration,
+    /// Presented frames per second over the last sample, which is what the
+    /// editor's readout shows while the compositor owns the preview.
+    fps: f32,
+    logged_at: Option<std::time::Instant>,
 }
 
 /// Composes one preview frame. Called from the editor's render pass, which is
@@ -274,7 +293,7 @@ pub(super) fn compose(
         composition.as_ref(),
     );
     view.native_preview.counters.spent += spent;
-    log_counters(&mut view.native_preview);
+    sample_counters(&mut view.native_preview);
 }
 
 /// The preview pane: the stage plus the inset around it.
@@ -299,13 +318,18 @@ fn pane_bounds(stage: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
 /// Presented frames are bounded by how often GPUI renders, because composition
 /// happens in the editor's render pass. While the legacy pipeline still decodes
 /// alongside this one, that is what paces both.
-fn log_counters(preview: &mut NativePreview) {
-    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+fn sample_counters(preview: &mut NativePreview) {
+    /// Short enough that the editor's readout follows playback rather than
+    /// lagging it by several seconds.
+    const SAMPLE: std::time::Duration = std::time::Duration::from_secs(1);
+    /// Logging is coarser, because one line a second is noise.
+    const REPORT: std::time::Duration = std::time::Duration::from_secs(5);
+
     let now = std::time::Instant::now();
     let counters = &mut preview.counters;
     if counters
         .at
-        .is_some_and(|at| now.duration_since(at) < INTERVAL)
+        .is_some_and(|at| now.duration_since(at) < SAMPLE)
     {
         return;
     }
@@ -313,21 +337,41 @@ fn log_counters(preview: &mut NativePreview) {
         return;
     };
     let previous = counters.at.replace(now);
-    let since = (presented - counters.presented, dropped - counters.dropped);
+    let since = presented - counters.presented;
     counters.presented = presented;
-    counters.dropped = dropped;
     let Some(elapsed) = previous.map(|at| now.duration_since(at)) else {
+        // The first sample has no interval to divide by; it only establishes
+        // the baseline the next one measures against.
+        counters.dropped = dropped;
+        counters.logged_at = Some(now);
+        counters.spent = std::time::Duration::ZERO;
         return;
     };
     let seconds = elapsed.as_secs_f64();
+    counters.fps = if seconds > 0.0 {
+        (since as f64 / seconds) as f32
+    } else {
+        0.0
+    };
+
+    if counters
+        .logged_at
+        .is_some_and(|at| now.duration_since(at) < REPORT)
+    {
+        return;
+    }
+    let reported = now.duration_since(counters.logged_at.unwrap_or(now));
+    counters.logged_at = Some(now);
+    let dropped_since = dropped - counters.dropped;
+    counters.dropped = dropped;
     let spent = std::mem::take(&mut counters.spent);
+    let frames = (reported.as_secs_f64() * f64::from(counters.fps)).round() as u64;
     tracing::info!(
         target: "recorder::rendering",
-        fps = if seconds > 0.0 { since.0 as f64 / seconds } else { 0.0 },
-        presented = since.0,
-        dropped = since.1,
-        frame_ms = if since.0 > 0 { spent.as_secs_f64() * 1_000.0 / since.0 as f64 } else { 0.0 },
-        seconds,
+        fps = counters.fps,
+        dropped = dropped_since,
+        frame_ms = if frames > 0 { spent.as_secs_f64() * 1_000.0 / frames as f64 } else { 0.0 },
+        seconds = reported.as_secs_f64(),
         "native preview"
     );
 }

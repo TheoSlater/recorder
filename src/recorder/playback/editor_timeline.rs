@@ -463,6 +463,11 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         .h(px(TIMELINE_HEIGHT))
         .flex_shrink_0()
         .overflow_hidden()
+        // The gutter behind the track labels is deliberately translucent, so
+        // this row owns an opaque base rather than borrowing the shell's. The
+        // shell cannot provide one: its fill would cover the preview, which the
+        // native compositor draws underneath GPUI.
+        .bg(cx.theme().background)
         .track_focus(&view.timeline_focus_handle)
         .cursor(cursor)
         .border_t_1()

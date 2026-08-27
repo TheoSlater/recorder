@@ -536,30 +536,58 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 
 #### Export
 
-- Export shares the composition renderer, so it needed re-running. Doing so
-  found a real pre-existing deadlock: `export::decoder::create_device` never
-  marked its D3D11 device multithread-protected, while the preview's device
-  always has. Media Foundation's source reader drives that device from its own
-  worker threads, and without the protection `ReadSample` blocked forever -
-  observed as an export consuming one second of CPU in twenty minutes. Both
-  ends now use the renderer's single device recipe, which documents why.
-- Past that, export reaches and completes decode and composition for the first
-  frame and then fails in `Encoder::write` with `E_INVALIDARG`. That is
-  unchanged Sink Writer code newly reachable now the deadlock is gone, so
-  export has evidently never completed on this machine. **Export is therefore
-  not verified**, and this is the first thing to chase.
-- `src/recorder/export/export_tests.rs` runs a real export end to end. It is
-  `#[ignore]`d because it needs a GPU, Media Foundation, and a recording under
-  `recordings/`, and it is bounded so a stalled Media Foundation call reports
-  where it stopped instead of hanging the suite. Export errors now carry their
-  stage (`encoder write: ...`) rather than a bare HRESULT.
+Export shares the composition renderer, so it needed re-running. Doing so found
+two pre-existing bugs that together meant export had never completed on this
+machine; both are fixed and export now runs end to end.
+
+- **The decoder device was not multithread-protected.**
+  `export::decoder::create_device` never called `SetMultithreadProtected`,
+  while the preview's device always has. Media Foundation's source reader
+  drives that device from its own worker threads, and without the protection
+  `ReadSample` blocked forever - observed as an export consuming one second of
+  CPU in twenty minutes. Both ends now use the renderer's single device recipe,
+  which documents why it is required.
+- **The DXGI surface buffer was submitted with a length of zero.**
+  `MFCreateDXGISurfaceBuffer` returns an empty buffer; downstream transforms
+  read the current length to decide how much data there is. Nothing set it, so
+  the encoder was handed a frame with no pixels and rejected it with
+  `E_INVALIDARG`. `Encoder::write` now measures the surface through
+  `IMF2DBuffer::GetContiguousLength` and sets the length before submitting.
+- `src/recorder/export/export_tests.rs` runs a real export end to end and
+  asserts the result is an MP4 (`ftyp` box) of a plausible size rather than
+  merely a non-empty file. It is `#[ignore]`d because it needs a GPU, Media
+  Foundation, and a recording under `recordings/`, and it is bounded so a
+  stalled Media Foundation call reports where it stopped instead of hanging the
+  suite. Export errors now carry their stage (`encoder write: ...`) rather than
+  a bare HRESULT.
+- Verified: a 4.1 s 1920x1080 recording exports in 1.2 s.
+
+#### Clearing GPUI's fills has a rule attached
+
+Making the shell transparent so the surface shows through means **every editor
+row outside the preview must paint its own opaque background**. The shell
+cannot paint one for them - its fill would cover the preview. A row that
+relied on the shell, or a translucent element that relied on an opaque
+backdrop, becomes a hole through to the desktop. This caught the timeline,
+whose track-label gutter is deliberately `popover.opacity(0.35)`; the timeline
+row now carries its own fill. The toolbar, inspector, and transport already had
+theirs.
+
+The editor's frame-rate readout had the same shape of problem: it read
+`metrics.presented_fps()`, which counts GPUI image paints that the native path
+deliberately no longer performs, so it sat at zero. It now reads the
+compositor's own presented rate while the compositor owns the preview.
 
 #### Not yet verified
 
-- Nobody has *looked* at the composed preview. Attachment, streaming, render,
-  and present were confirmed from logs and counters on real hardware; the
-  picture itself - colours, cursor placement, corner radii, blur - has not been
-  visually confirmed.
+- Confirmed by eye on a real project: the canvas background, the recording at
+  its correct aspect ratio, and the rounded canvas corners all render as they
+  did under the GPUI preview.
+- Not yet seen: the reconstructed cursor, an active zoom, and either motion
+  blur. The first look used `RECORDER_DEBUG_OPEN_VIDEO`, which passes empty
+  telemetry and session paths and default project settings, so that run had no
+  cursor and no zoom regions by construction rather than by fault. Open a
+  project from the home screen with `RECORDER_PREVIEW_SPIKE=1` to exercise them.
 - Resize, maximise/restore, minimise/restore, DPI changes, and moving between
   monitors all reach `set_bounds`, which rebuilds the swapchain only when the
   size differs, but none of that matrix has been exercised.
@@ -585,14 +613,11 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 - If runtime testing exposes color-conversion or source-reader compatibility
   gaps, add a small fixture-backed thumbnail decoder test or enable only the
   required Media Foundation video-processing path without changing playback.
-- Fix the export `E_INVALIDARG` in `Encoder::write`. Decode and composition now
-  succeed and the sink writer rejects the first sample; suspect the ARGB32 input
-  media type reaching the hardware H.264 MFT through a DXGI surface buffer.
-  `cargo test --release -- --ignored exports_a_recording` reproduces it.
-- Look at the native preview and confirm the composed picture: background
-  colours and gradients, recording aspect and corner radius, cursor position and
-  size, zoom framing, and the movement and radial blurs. Presented frames are
-  confirmed; the picture is not.
+- Look at the native preview's remaining layers on a project opened from the
+  home screen: the reconstructed cursor, an active zoom region, and the movement
+  and radial blurs. Background, aspect, and corner radius are confirmed.
+- Compare an exported file against the preview frame by frame, now that both run
+  the same composition code, to confirm they agree rather than assuming it.
 - Exercise the surface lifecycle matrix on the native path - window resize,
   maximise/restore, minimise/restore, DPI change, moving between monitors, and
   inspector layout changes - watching for stale rectangles, stretching, flicker,

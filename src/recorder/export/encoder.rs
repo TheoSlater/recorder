@@ -5,9 +5,9 @@ use anyhow::{Context, Result, anyhow};
 use windows::{
     Win32::Graphics::Direct3D11::ID3D11Texture2D,
     Win32::Media::MediaFoundation::{
-        IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, MF_MT_ALL_SAMPLES_INDEPENDENT,
-        MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
-        MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
+        IMF2DBuffer, IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter,
+        MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
+        MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
         MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_D3D_MANAGER,
         MF_SINK_WRITER_DISABLE_THROTTLING, MFCreateAttributes, MFCreateDXGISurfaceBuffer,
         MFCreateMediaType, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video,
@@ -69,13 +69,22 @@ impl Encoder {
     ) -> Result<()> {
         let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false) }
             .context("could not wrap rendered D3D11 frame")?;
+        // A DXGI surface buffer is created empty. Downstream transforms read
+        // the current length to decide how much data there is, so leaving it at
+        // zero hands the encoder a frame with no pixels in it.
+        let length = unsafe { buffer.cast::<IMF2DBuffer>()?.GetContiguousLength() }
+            .context("could not measure the rendered frame")?;
+        unsafe { buffer.SetCurrentLength(length) }
+            .context("could not set the rendered frame length")?;
         let sample: IMFSample =
             unsafe { MFCreateSample() }.context("could not create output sample")?;
         unsafe {
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime(timestamp_100ns.min(i64::MAX as u64) as i64)?;
             sample.SetSampleDuration(duration_100ns.max(1).min(i64::MAX as u64) as i64)?;
-            self.writer.WriteSample(self.stream, &sample)?;
+            self.writer
+                .WriteSample(self.stream, &sample)
+                .context("sink writer rejected the frame")?;
         }
         Ok(())
     }
