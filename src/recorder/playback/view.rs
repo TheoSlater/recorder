@@ -110,6 +110,14 @@ pub(crate) struct PlaybackView {
     pub(super) selected_cursor_size_region: Option<usize>,
     pub(super) hovered_zoom_hit: Option<editor_timeline::ZoomHit>,
     pub(super) hovered_cursor_size_hit: Option<editor_timeline::CursorSizeHit>,
+    /// Focus root for the editor.
+    ///
+    /// The shell handles transport keys in the capture phase, and GPUI only
+    /// dispatches key events along the focus path, so without something focused
+    /// inside the shell those keys go nowhere. The timeline used to be the only
+    /// focusable thing in the editor, which is why the spacebar worked only
+    /// after clicking it.
+    pub(super) shell_focus_handle: FocusHandle,
     pub(super) timeline_focus_handle: FocusHandle,
     timeline_interaction: Option<editor_timeline::TimelineInteraction>,
     zoom_interaction_changed: bool,
@@ -221,6 +229,7 @@ impl PlaybackView {
             selected_cursor_size_region: None,
             hovered_zoom_hit: None,
             hovered_cursor_size_hit: None,
+            shell_focus_handle: cx.focus_handle(),
             timeline_focus_handle: cx.focus_handle(),
             timeline_interaction: None,
             zoom_interaction_changed: false,
@@ -305,6 +314,7 @@ impl PlaybackView {
             selected_cursor_size_region: None,
             hovered_zoom_hit: None,
             hovered_cursor_size_hit: None,
+            shell_focus_handle: cx.focus_handle(),
             timeline_focus_handle: cx.focus_handle(),
             timeline_interaction: None,
             zoom_interaction_changed: false,

@@ -319,9 +319,10 @@ fn pane_bounds(stage: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
 /// happens in the editor's render pass. While the legacy pipeline still decodes
 /// alongside this one, that is what paces both.
 fn sample_counters(preview: &mut NativePreview) {
-    /// Short enough that the editor's readout follows playback rather than
-    /// lagging it by several seconds.
-    const SAMPLE: std::time::Duration = std::time::Duration::from_secs(1);
+    /// Short enough that the editor's readout tracks playback instead of
+    /// trailing it. At 60 FPS this still averages fifteen frames, which is
+    /// steady without being sluggish.
+    const SAMPLE: std::time::Duration = std::time::Duration::from_millis(250);
     /// Logging is coarser, because one line a second is noise.
     const REPORT: std::time::Duration = std::time::Duration::from_secs(5);
 

@@ -224,9 +224,10 @@ Native Windows screen recorder built with GPUI, gpui-component, and
   decode, resize, cache, stale, drop, and eviction metrics are logged when the
   manager closes.
 - Thumbnail requests are associated with each playback editor and shut down
-  with its worker. The filmstrip is painted behind regions and the playhead,
-  clipped to the Video lane and timeline viewport, and remains visual-only so
-  existing track seeking and zoom-region interaction are unchanged.
+  with its worker. The filmstrip is painted in a clipped lower layer, with
+  regions, scrub handles, separators, and the playhead in an explicit higher
+  layer. It remains visual-only so existing track seeking and zoom-region
+  interaction are unchanged.
 - Playback performance audit: Media Foundation NV12 conversion now runs in parallel
   across bounded worker rows, keeping decoding and conversion off the GPUI thread.
   A replaced `RenderImage` is released from the playback window during its render
@@ -603,7 +604,7 @@ compositor's own presented rate while the compositor owns the preview.
 
 ## Next
 
-- Verify RGB32 orientation/channel order and thumbnail quality on real Windows
+- Verify ARGB32 orientation/channel order and thumbnail quality on real Windows
   recordings at 1080p60, 1440p60, and 3440x1440; measure timeline paint time,
   decode latency, cache hit rate, and memory while repeatedly zooming and
   reopening projects.

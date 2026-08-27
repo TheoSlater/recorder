@@ -14,9 +14,11 @@ use windows::Win32::Foundation::RECT;
 use windows::Win32::Graphics::{
     Direct3D::D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
     Direct3D11::{
-        D3D11_CULL_NONE, D3D11_FILL_SOLID, D3D11_FILTER_MIN_MAG_MIP_LINEAR,
-        D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE, D3D11_RASTERIZER_DESC,
-        D3D11_SAMPLER_DESC, D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT, ID3D11Buffer,
+        D3D11_BLEND_DESC, D3D11_BLEND_INV_SRC_ALPHA, D3D11_BLEND_ONE, D3D11_BLEND_OP_ADD,
+        D3D11_COLOR_WRITE_ENABLE_ALL, D3D11_CULL_NONE, D3D11_FILL_SOLID,
+        D3D11_FILTER_MIN_MAG_MIP_LINEAR, D3D11_MAP_WRITE_DISCARD, D3D11_MAPPED_SUBRESOURCE,
+        D3D11_RASTERIZER_DESC, D3D11_RENDER_TARGET_BLEND_DESC, D3D11_SAMPLER_DESC,
+        D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_VIEWPORT, ID3D11BlendState, ID3D11Buffer,
         ID3D11DepthStencilView, ID3D11Device, ID3D11DeviceContext, ID3D11PixelShader,
         ID3D11RasterizerState, ID3D11RenderTargetView, ID3D11SamplerState,
         ID3D11ShaderResourceView, ID3D11Texture2D, ID3D11VertexShader,
@@ -36,6 +38,7 @@ pub(crate) struct CompositionRenderer {
     constants: ID3D11Buffer,
     sampler: ID3D11SamplerState,
     clip: ID3D11RasterizerState,
+    blend: ID3D11BlendState,
     vertex_shader: ID3D11VertexShader,
     texture_shader: ID3D11PixelShader,
     movement_blur_shader: ID3D11PixelShader,
@@ -53,6 +56,7 @@ impl CompositionRenderer {
             constants: resources::create_constants(device)?,
             sampler: create_sampler(device)?,
             clip: create_clip_state(device)?,
+            blend: create_blend_state(device)?,
             vertex_shader: resources::create_vertex_shader(device)?,
             texture_shader: resources::create_pixel_shader(device, &shaders::texture())?,
             movement_blur_shader: resources::create_pixel_shader(
@@ -121,7 +125,13 @@ impl CompositionRenderer {
             self.draw_quad(constants, Some(recording), self.recording_shader(pass))?;
         }
         if let Some(constants) = Constants::cursor(state) {
-            self.draw_quad(constants, None, &self.cursor_shader)?;
+            // The only blended layer. Everything under it is opaque, and the
+            // cursor's antialiased outline is the one place the composition
+            // needs a source-over rather than a straight write.
+            unsafe { self.context.OMSetBlendState(&self.blend, None, u32::MAX) };
+            let drawn = self.draw_quad(constants, None, &self.cursor_shader);
+            unsafe { self.context.OMSetBlendState(None, None, u32::MAX) };
+            drawn?;
         }
         unsafe { self.context.Flush() };
         Ok(())
@@ -241,6 +251,35 @@ fn create_sampler(device: &ID3D11Device) -> Result<ID3D11SamplerState> {
     }
     .map_err(|error| RenderError::Device(format!("could not create the sampler: {error}")))?;
     sampler.ok_or_else(|| RenderError::Device("composition sampler was null".into()))
+}
+
+/// Source-over blending for premultiplied colour, which is what the cursor
+/// shader emits and what the composition swapchain expects.
+fn create_blend_state(device: &ID3D11Device) -> Result<ID3D11BlendState> {
+    let mut target = [D3D11_RENDER_TARGET_BLEND_DESC::default(); 8];
+    target[0] = D3D11_RENDER_TARGET_BLEND_DESC {
+        BlendEnable: true.into(),
+        SrcBlend: D3D11_BLEND_ONE,
+        DestBlend: D3D11_BLEND_INV_SRC_ALPHA,
+        BlendOp: D3D11_BLEND_OP_ADD,
+        SrcBlendAlpha: D3D11_BLEND_ONE,
+        DestBlendAlpha: D3D11_BLEND_INV_SRC_ALPHA,
+        BlendOpAlpha: D3D11_BLEND_OP_ADD,
+        RenderTargetWriteMask: D3D11_COLOR_WRITE_ENABLE_ALL.0 as u8,
+    };
+    let mut state = None;
+    unsafe {
+        device.CreateBlendState(
+            &D3D11_BLEND_DESC {
+                AlphaToCoverageEnable: false.into(),
+                IndependentBlendEnable: false.into(),
+                RenderTarget: target,
+            },
+            Some(&mut state),
+        )
+    }
+    .map_err(|error| RenderError::Device(format!("could not create the blend state: {error}")))?;
+    state.ok_or_else(|| RenderError::Device("composition blend state was null".into()))
 }
 
 /// A rasterizer state that clips to the canvas.

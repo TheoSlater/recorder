@@ -179,35 +179,73 @@ float4 main(Input input) : SV_TARGET {
     )
 }
 
+/// The reconstructed cursor, drawn from the same geometry as the SVG assets the
+/// legacy preview rasterises.
+///
+/// Signed distance rather than a sampled bitmap: the cursor is scalable and
+/// scaled, so a distance field stays crisp at any size where a 24x32 sprite
+/// would blur. Both shapes are stroked exactly as the assets are — a 2px stroke
+/// centred on the path, black outside white — so the preview, the export, and
+/// the legacy preview agree on what the cursor looks like.
 pub(crate) fn cursor() -> String {
     format!(
         "{CONSTANTS}{}",
         r#"
-// `triangle` is a reserved HLSL primitive keyword, so this cannot take the
-// obvious name.
-bool inside_triangle(float2 p, float2 a, float2 b, float2 c) {
-    float ab = (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);
-    float bc = (c.x-b.x)*(p.y-b.y)-(c.y-b.y)*(p.x-b.x);
-    float ca = (a.x-c.x)*(p.y-c.y)-(a.y-c.y)*(p.x-c.x);
-    return (ab >= 0.0 && bc >= 0.0 && ca >= 0.0) || (ab <= 0.0 && bc <= 0.0 && ca <= 0.0);
+// The default cursor's outline, in its own 24x32 space. Taken from the asset's
+// path data, so the two cannot drift.
+static const int ARROW_POINTS = 7;
+static const float2 ARROW[ARROW_POINTS] = {
+    float2(2, 1), float2(2, 28), float2(9, 21), float2(14, 31),
+    float2(18, 29), float2(13, 19), float2(22, 19)
+};
+static const float STROKE = 1.0;
+
+float segment_distance(float2 p, float2 a, float2 b) {
+    float2 pa = p - a;
+    float2 ba = b - a;
+    float h = saturate(dot(pa, ba) / max(dot(ba, ba), 1e-6));
+    return length(pa - ba * h);
 }
-bool arrow(float2 p) {
-    return inside_triangle(p,float2(2,1),float2(2,28),float2(9,21)) ||
-           inside_triangle(p,float2(2,1),float2(9,21),float2(14,31)) ||
-           inside_triangle(p,float2(2,1),float2(14,31),float2(18,29)) ||
-           inside_triangle(p,float2(2,1),float2(18,29),float2(13,19)) ||
-           inside_triangle(p,float2(2,1),float2(13,19),float2(23,19));
+
+// Negative inside the outline. Distance to the nearest edge gives round joins
+// for free, which is what the asset's stroke-linejoin asks for.
+float arrow_distance(float2 p) {
+    float distance = 1e9;
+    bool inside = false;
+    [unroll] for (int i = 0; i < ARROW_POINTS; ++i) {
+        float2 a = ARROW[i];
+        float2 b = ARROW[(i + 1) % ARROW_POINTS];
+        distance = min(distance, segment_distance(p, a, b));
+        if (((a.y > p.y) != (b.y > p.y)) &&
+            (p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x)) {
+            inside = !inside;
+        }
+    }
+    return inside ? -distance : distance;
 }
+
+// White fill, black stroke, premultiplied so the blend over the composition is
+// a plain source-over.
+float4 stroked(float signed_distance, float width) {
+    float edge = max(fwidth(signed_distance), 1e-4);
+    float alpha = 1.0 - smoothstep(width - edge, width + edge, signed_distance);
+    if (alpha <= 0.0) discard;
+    float ink = smoothstep(-width - edge, -width + edge, signed_distance);
+    float3 color = lerp(float3(1, 1, 1), float3(0, 0, 0), ink);
+    return float4(color * alpha, alpha);
+}
+
 float4 main(Input input) : SV_TARGET {
     if (misc.w > 0.5) {
-        float d = distance(input.local, float2(0.5,0.5));
-        if (d > 0.5) discard;
-        return d < 0.42 ? float4(1,1,1,1) : float4(0,0,0,1);
+        // Circle: an 11-radius white disc with a 2px stroke and a 3-radius dot.
+        float2 p = input.local * 32.0;
+        float radius = distance(p, float2(16, 16));
+        float edge = max(fwidth(radius), 1e-4);
+        float4 ring = stroked(radius - 11.0, STROKE);
+        float dot_alpha = 1.0 - smoothstep(3.0 - edge, 3.0 + edge, radius);
+        return lerp(ring, float4(0, 0, 0, 1), dot_alpha);
     }
-    float2 p = input.local * float2(24,32);
-    if (!arrow(p)) discard;
-    float2 inner = (p - float2(2,1)) * 0.86 + float2(2,1);
-    return arrow(inner) ? float4(1,1,1,1) : float4(0,0,0,1);
+    return stroked(arrow_distance(input.local * float2(24, 32)), STROKE);
 }
 "#
     )

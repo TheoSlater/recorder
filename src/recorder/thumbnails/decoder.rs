@@ -12,10 +12,11 @@ use gpui::RenderImage;
 use image::{Frame, ImageBuffer, Rgba, imageops::FilterType};
 use windows::{
     Win32::Media::MediaFoundation::{
-        IMFSample, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE,
-        MF_MT_SUBTYPE, MF_PD_DURATION, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
-        MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MFCreateMediaType,
-        MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_RGB32,
+        IMFAttributes, IMFSample, IMFSourceReader, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_SIZE,
+        MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION,
+        MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+        MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MFCreateAttributes,
+        MFCreateMediaType, MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_ARGB32,
     },
     Win32::System::{
         Com::StructuredStorage::{
@@ -47,8 +48,19 @@ pub(super) struct ExtractedFrame {
 impl Decoder {
     pub(super) fn open(path: &Path) -> Result<Self> {
         let url: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let reader = unsafe { MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), None) }
-            .map_err(|error| anyhow!("could not open thumbnail source: {error}"))?;
+        let mut attributes = None;
+        unsafe { MFCreateAttributes(&mut attributes, 1) }
+            .map_err(|error| anyhow!("could not create thumbnail reader attributes: {error}"))?;
+        let attributes: IMFAttributes =
+            attributes.ok_or_else(|| anyhow!("thumbnail reader attributes are null"))?;
+        unsafe {
+            attributes
+                .SetUINT32(&MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, 1)
+                .map_err(|error| anyhow!("could not enable thumbnail video processing: {error}"))?;
+        }
+        let reader =
+            unsafe { MFCreateSourceReaderFromURL(PCWSTR(url.as_ptr()), Some(&attributes)) }
+                .map_err(|error| anyhow!("could not open thumbnail source: {error}"))?;
         let media_type = unsafe { MFCreateMediaType() }
             .map_err(|error| anyhow!("could not create thumbnail media type: {error}"))?;
         unsafe {
@@ -56,11 +68,11 @@ impl Decoder {
                 .SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)
                 .map_err(|error| anyhow!("could not set thumbnail major type: {error}"))?;
             media_type
-                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_RGB32)
-                .map_err(|error| anyhow!("could not set RGB32 output type: {error}"))?;
+                .SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_ARGB32)
+                .map_err(|error| anyhow!("could not set ARGB32 output type: {error}"))?;
             reader
                 .SetCurrentMediaType(VIDEO_STREAM, None, &media_type)
-                .map_err(|error| anyhow!("could not select RGB32 output type: {error}"))?;
+                .map_err(|error| anyhow!("could not select ARGB32 output type: {error}"))?;
         }
         let current_type = unsafe { reader.GetCurrentMediaType(VIDEO_STREAM) }
             .map_err(|error| anyhow!("could not read thumbnail media type: {error}"))?;
@@ -104,7 +116,7 @@ impl Decoder {
             return Ok(None);
         };
         let buffer = unsafe { sample.ConvertToContiguousBuffer() }?;
-        let pixels = copy_rgb32_buffer(&buffer, self.width, self.height, self.stride)?;
+        let pixels = copy_argb32_buffer(&buffer, self.width, self.height, self.stride)?;
         if !should_continue() {
             return Ok(None);
         }
@@ -167,7 +179,7 @@ impl Decoder {
     }
 }
 
-fn copy_rgb32_buffer(
+fn copy_argb32_buffer(
     buffer: &windows::Win32::Media::MediaFoundation::IMFMediaBuffer,
     width: u32,
     height: u32,
@@ -192,7 +204,7 @@ fn copy_rgb32_buffer(
     }
     let result = (|| -> Result<Vec<u8>> {
         if (current_length as usize) < required {
-            bail!("thumbnail RGB32 buffer is truncated");
+            bail!("thumbnail ARGB32 buffer is truncated");
         }
         let source = unsafe { slice::from_raw_parts(pointer, current_length as usize) };
         let output_len = row_bytes

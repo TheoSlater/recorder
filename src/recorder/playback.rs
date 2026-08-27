@@ -127,6 +127,10 @@ pub(super) fn open(
             }
         };
         view.update(cx, |view, cx| {
+            // Without this the editor opens with nothing focused, and the
+            // transport keys stay dead until the user happens to click the
+            // timeline.
+            window.focus(&view.shell_focus_handle, cx);
             view.subscribe_cursor_controls(cx);
             view.subscribe_canvas_controls(cx);
             view.start_event_listener(cx);

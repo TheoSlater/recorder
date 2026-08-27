@@ -303,139 +303,145 @@ fn paint_timeline(
             border,
             background,
         );
-        for index in 1..TRACK_NAMES.len() {
-            let y = bounds.origin.y.as_f32() + track_y(index) + TRACK_HEIGHT / 2. - 1.;
+        // GPUI orders image sprites above quads in one paint layer. Keep the
+        // timeline controls in a later layer so the playhead and scrub handles
+        // remain visible over the filmstrip.
+        window.paint_layer(content, |window| {
+            for index in 1..TRACK_NAMES.len() {
+                let y = bounds.origin.y.as_f32() + track_y(index) + TRACK_HEIGHT / 2. - 1.;
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(px(content.origin.x.as_f32()), px(y)),
+                        size(content.size.width, px(2.)),
+                    ),
+                    muted.opacity(0.4),
+                ));
+            }
+
+            let (visible_start_us, visible_end_us) =
+                state.visible_time_range_us(content.size.width.as_f32(), REGION_CULL_MARGIN_PIXELS);
+            for (index, region) in cursor_size_regions.iter().enumerate() {
+                if region.end_us < visible_start_us || region.start_us > visible_end_us {
+                    continue;
+                }
+                let start_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(region.start_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let end_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(region.end_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let y = bounds.origin.y.as_f32() + track_y(1) + 3.;
+                let height = TRACK_HEIGHT - 6.;
+                let region_bounds = Bounds::new(
+                    point(px(start_x), px(y)),
+                    size(px((end_x - start_x).max(0.)), px(height)),
+                );
+                let selected = selected_cursor_size_region == Some(index);
+                let (ease_in_end_us, ease_out_start_us) = region.transition_points();
+                let ease_in_end_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(ease_in_end_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let ease_out_start_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(ease_out_start_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let ramp_color = primary.opacity(if selected { 0.34 } else { 0.13 });
+                let hold_color = primary.opacity(if selected { 0.56 } else { 0.25 });
+                paint_segment(window, start_x, ease_in_end_x, y, height, ramp_color);
+                paint_segment(
+                    window,
+                    ease_in_end_x,
+                    ease_out_start_x,
+                    y,
+                    height,
+                    hold_color,
+                );
+                paint_segment(window, ease_out_start_x, end_x, y, height, ramp_color);
+                if selected {
+                    window.paint_quad(outline(region_bounds, primary, BorderStyle::Solid));
+                }
+
+                let keyframe_color = primary.opacity(if selected { 1.0 } else { 0.78 });
+                paint_keyframe(window, start_x, y + height / 2., keyframe_color);
+                paint_keyframe(window, ease_in_end_x, y + height / 2., keyframe_color);
+                paint_keyframe(window, ease_out_start_x, y + height / 2., keyframe_color);
+                paint_keyframe(window, end_x, y + height / 2., keyframe_color);
+                let show_handles =
+                    selected || hovered_cursor_size_hit.is_some_and(|hit| hit.index() == index);
+                if show_handles {
+                    let handle_color = primary.opacity(0.9);
+                    paint_edge_handle(window, start_x, y, height, handle_color);
+                    paint_edge_handle(window, end_x, y, height, handle_color);
+                }
+            }
+
+            for (index, region) in zoom_regions.iter().enumerate() {
+                if region.end_us < visible_start_us || region.start_us > visible_end_us {
+                    continue;
+                }
+                let start_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(region.start_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let end_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(region.end_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let y = bounds.origin.y.as_f32() + track_y(2) + 3.;
+                let height = TRACK_HEIGHT - 6.;
+                let region_bounds = Bounds::new(
+                    point(px(start_x), px(y)),
+                    size(px((end_x - start_x).max(0.)), px(height)),
+                );
+                let selected = selected_zoom_region == Some(index);
+                let (zoom_in_end_us, zoom_out_start_us) = region.transition_points();
+                let zoom_in_end_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(zoom_in_end_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let zoom_out_start_x = content.origin.x.as_f32()
+                    + (micros_to_seconds(zoom_out_start_us) - micros_to_seconds(scroll_us)) as f32
+                        * state.pixels_per_second;
+                let ramp_color = primary.opacity(if selected { 0.34 } else { 0.13 });
+                let hold_color = primary.opacity(if selected { 0.56 } else { 0.25 });
+                paint_segment(window, start_x, zoom_in_end_x, y, height, ramp_color);
+                paint_segment(
+                    window,
+                    zoom_in_end_x,
+                    zoom_out_start_x,
+                    y,
+                    height,
+                    hold_color,
+                );
+                paint_segment(window, zoom_out_start_x, end_x, y, height, ramp_color);
+                if selected {
+                    window.paint_quad(outline(region_bounds, primary, BorderStyle::Solid));
+                }
+                let show_handles =
+                    selected || hovered_zoom_hit.is_some_and(|hit| hit.index() == index);
+                if show_handles {
+                    let handle_color = primary.opacity(0.9);
+                    paint_edge_handle(window, start_x, y, height, handle_color);
+                    paint_edge_handle(window, end_x, y, height, handle_color);
+                    paint_zoom_transition_handle(window, zoom_in_end_x, y, height, handle_color);
+                    paint_zoom_transition_handle(window, zoom_out_start_x, y, height, handle_color);
+                }
+            }
+
+            let playhead_x = content.origin.x.as_f32()
+                + (state.playhead_seconds() - micros_to_seconds(scroll_us)) as f32
+                    * state.pixels_per_second;
             window.paint_quad(fill(
                 Bounds::new(
-                    point(px(content.origin.x.as_f32()), px(y)),
-                    size(content.size.width, px(2.)),
+                    point(px(playhead_x - 1.), bounds.origin.y),
+                    size(px(2.), bounds.size.height),
                 ),
-                muted.opacity(0.4),
+                primary,
             ));
-        }
-
-        let (visible_start_us, visible_end_us) =
-            state.visible_time_range_us(content.size.width.as_f32(), REGION_CULL_MARGIN_PIXELS);
-        for (index, region) in cursor_size_regions.iter().enumerate() {
-            if region.end_us < visible_start_us || region.start_us > visible_end_us {
-                continue;
-            }
-            let start_x = content.origin.x.as_f32()
-                + (micros_to_seconds(region.start_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let end_x = content.origin.x.as_f32()
-                + (micros_to_seconds(region.end_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let y = bounds.origin.y.as_f32() + track_y(1) + 3.;
-            let height = TRACK_HEIGHT - 6.;
-            let region_bounds = Bounds::new(
-                point(px(start_x), px(y)),
-                size(px((end_x - start_x).max(0.)), px(height)),
-            );
-            let selected = selected_cursor_size_region == Some(index);
-            let (ease_in_end_us, ease_out_start_us) = region.transition_points();
-            let ease_in_end_x = content.origin.x.as_f32()
-                + (micros_to_seconds(ease_in_end_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let ease_out_start_x = content.origin.x.as_f32()
-                + (micros_to_seconds(ease_out_start_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let ramp_color = primary.opacity(if selected { 0.34 } else { 0.13 });
-            let hold_color = primary.opacity(if selected { 0.56 } else { 0.25 });
-            paint_segment(window, start_x, ease_in_end_x, y, height, ramp_color);
-            paint_segment(
-                window,
-                ease_in_end_x,
-                ease_out_start_x,
-                y,
-                height,
-                hold_color,
-            );
-            paint_segment(window, ease_out_start_x, end_x, y, height, ramp_color);
-            if selected {
-                window.paint_quad(outline(region_bounds, primary, BorderStyle::Solid));
-            }
-
-            let keyframe_color = primary.opacity(if selected { 1.0 } else { 0.78 });
-            paint_keyframe(window, start_x, y + height / 2., keyframe_color);
-            paint_keyframe(window, ease_in_end_x, y + height / 2., keyframe_color);
-            paint_keyframe(window, ease_out_start_x, y + height / 2., keyframe_color);
-            paint_keyframe(window, end_x, y + height / 2., keyframe_color);
-            let show_handles =
-                selected || hovered_cursor_size_hit.is_some_and(|hit| hit.index() == index);
-            if show_handles {
-                let handle_color = primary.opacity(0.9);
-                paint_edge_handle(window, start_x, y, height, handle_color);
-                paint_edge_handle(window, end_x, y, height, handle_color);
-            }
-        }
-
-        for (index, region) in zoom_regions.iter().enumerate() {
-            if region.end_us < visible_start_us || region.start_us > visible_end_us {
-                continue;
-            }
-            let start_x = content.origin.x.as_f32()
-                + (micros_to_seconds(region.start_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let end_x = content.origin.x.as_f32()
-                + (micros_to_seconds(region.end_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let y = bounds.origin.y.as_f32() + track_y(2) + 3.;
-            let height = TRACK_HEIGHT - 6.;
-            let region_bounds = Bounds::new(
-                point(px(start_x), px(y)),
-                size(px((end_x - start_x).max(0.)), px(height)),
-            );
-            let selected = selected_zoom_region == Some(index);
-            let (zoom_in_end_us, zoom_out_start_us) = region.transition_points();
-            let zoom_in_end_x = content.origin.x.as_f32()
-                + (micros_to_seconds(zoom_in_end_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let zoom_out_start_x = content.origin.x.as_f32()
-                + (micros_to_seconds(zoom_out_start_us) - micros_to_seconds(scroll_us)) as f32
-                    * state.pixels_per_second;
-            let ramp_color = primary.opacity(if selected { 0.34 } else { 0.13 });
-            let hold_color = primary.opacity(if selected { 0.56 } else { 0.25 });
-            paint_segment(window, start_x, zoom_in_end_x, y, height, ramp_color);
-            paint_segment(
-                window,
-                zoom_in_end_x,
-                zoom_out_start_x,
-                y,
-                height,
-                hold_color,
-            );
-            paint_segment(window, zoom_out_start_x, end_x, y, height, ramp_color);
-            if selected {
-                window.paint_quad(outline(region_bounds, primary, BorderStyle::Solid));
-            }
-            let show_handles = selected || hovered_zoom_hit.is_some_and(|hit| hit.index() == index);
-            if show_handles {
-                let handle_color = primary.opacity(0.9);
-                paint_edge_handle(window, start_x, y, height, handle_color);
-                paint_edge_handle(window, end_x, y, height, handle_color);
-                paint_zoom_transition_handle(window, zoom_in_end_x, y, height, handle_color);
-                paint_zoom_transition_handle(window, zoom_out_start_x, y, height, handle_color);
-            }
-        }
-
-        let playhead_x = content.origin.x.as_f32()
-            + (state.playhead_seconds() - micros_to_seconds(scroll_us)) as f32
-                * state.pixels_per_second;
-        window.paint_quad(fill(
-            Bounds::new(
-                point(px(playhead_x - 1.), bounds.origin.y),
-                size(px(2.), bounds.size.height),
-            ),
-            primary,
-        ));
-        window.paint_quad(fill(
-            Bounds::new(
-                point(px(playhead_x - 5.), bounds.origin.y),
-                size(px(10.), px(8.)),
-            ),
-            primary,
-        ));
+            window.paint_quad(fill(
+                Bounds::new(
+                    point(px(playhead_x - 5.), bounds.origin.y),
+                    size(px(10.), px(8.)),
+                ),
+                primary,
+            ));
+        });
     });
 
     window.paint_quad(fill(

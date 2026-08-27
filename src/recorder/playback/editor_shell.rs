@@ -30,6 +30,10 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         .min_h(px(0.))
         .bg(view.native_preview.background(cx.theme().background))
         .text_color(cx.theme().foreground)
+        // The focus root. Transport keys are handled here in the capture phase,
+        // and a key event only travels the focus path, so the shell has to be
+        // on it whatever the user last clicked.
+        .track_focus(&view.shell_focus_handle)
         .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
             if !event.is_held
                 && event.keystroke.key.eq_ignore_ascii_case("space")
