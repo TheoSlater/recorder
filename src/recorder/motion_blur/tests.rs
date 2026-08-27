@@ -12,12 +12,33 @@ fn transform(center_x: f32, center_y: f32, size: f32) -> RecordingTransform {
         .expect("test transform should be usable")
 }
 
+const FULL: MotionBlurSettings = MotionBlurSettings { amount: 1.0 };
+
+/// Classifies one 60 FPS step at full authored strength.
 fn classify(
     previous: RecordingTransform,
     current: RecordingTransform,
     previous_mode: MotionBlurMode,
 ) -> MotionBlurDescriptor {
-    compute_display_motion_blur(previous, current, previous_mode, CENTER, 1.0)
+    compute_display_motion_blur(
+        previous,
+        current,
+        0.0,
+        FRAME_60,
+        previous_mode,
+        CENTER,
+        FULL,
+    )
+}
+
+/// Gains applied to a 60 FPS step, so magnitude assertions stay correct when
+/// the multipliers are retuned.
+fn movement_gain() -> f32 {
+    FULL.movement_strength(1.0)
+}
+
+fn zoom_gain() -> f32 {
+    FULL.zoom_strength(1.0)
 }
 
 #[test]
@@ -51,7 +72,10 @@ fn smears_along_horizontal_movement() {
 
     assert_eq!(blur.mode, MotionBlurMode::Movement);
     // A tenth of the layer's own width: 0.05 of the canvas over a half-canvas layer.
-    assert!((blur.movement_uv.x - 0.1).abs() < 1e-5, "{blur:?}");
+    assert!(
+        (blur.movement_uv.x - 0.1 * movement_gain()).abs() < 1e-5,
+        "{blur:?}"
+    );
     assert!(blur.movement_uv.y.abs() < 1e-6, "{blur:?}");
 }
 
@@ -65,7 +89,12 @@ fn smears_along_vertical_movement() {
 
     assert_eq!(blur.mode, MotionBlurMode::Movement);
     assert!(blur.movement_uv.x.abs() < 1e-6, "{blur:?}");
-    assert!((blur.movement_uv.y + 0.12).abs() < 1e-5, "{blur:?}");
+    // Upwards travel keeps a negative vector: direction survives the gain.
+    assert!(blur.movement_uv.y < 0.0, "{blur:?}");
+    assert!(
+        (blur.movement_uv.y + 0.12 * movement_gain()).abs() < 1e-5,
+        "{blur:?}"
+    );
 }
 
 #[test]
@@ -89,7 +118,14 @@ fn classifies_scale_change_as_zoom() {
     );
 
     assert_eq!(blur.mode, MotionBlurMode::Zoom);
-    assert!((blur.zoom_amount - 0.04).abs() < 1e-5, "{blur:?}");
+    assert!(
+        blur.zoom_amount > 0.0,
+        "zooming in reads positive: {blur:?}"
+    );
+    assert!(
+        (blur.zoom_amount - 0.04 * zoom_gain()).abs() < 1e-5,
+        "{blur:?}"
+    );
     assert_eq!(blur.movement_uv, Vec2::ZERO);
 }
 
@@ -153,9 +189,11 @@ fn carries_zoom_center() {
     let blur = compute_display_motion_blur(
         transform(0.5, 0.5, 0.5),
         transform(0.5, 0.5, 0.55),
+        0.0,
+        FRAME_60,
         MotionBlurMode::None,
         focus,
-        1.0,
+        FULL,
     );
 
     assert_eq!(blur.mode, MotionBlurMode::Zoom);
@@ -163,16 +201,75 @@ fn carries_zoom_center() {
 }
 
 #[test]
-fn bypasses_zero_strength() {
+fn classifies_scale_dominant_transform() {
+    // A small nudge against a large scale change: zoom wins outright, so no
+    // previous mode is needed to break the tie.
+    let blur = classify(
+        transform(0.5, 0.5, 0.5),
+        transform(0.503, 0.5, 0.56),
+        MotionBlurMode::Movement,
+    );
+
+    assert_eq!(blur.mode, MotionBlurMode::Zoom);
+}
+
+#[test]
+fn classification_bypasses_zero_amount() {
     let blur = compute_display_motion_blur(
         transform(0.5, 0.5, 0.5),
         transform(0.9, 0.5, 0.9),
+        0.0,
+        FRAME_60,
         MotionBlurMode::None,
         CENTER,
-        0.0,
+        MotionBlurSettings { amount: 0.0 },
     );
 
     assert_eq!(blur.mode, MotionBlurMode::None);
+    assert_eq!(blur.movement_uv, Vec2::ZERO);
+    assert_eq!(blur.zoom_amount, 0.0);
+    assert_eq!(blur.strength, 0.0);
+}
+
+#[test]
+fn scales_display_strength_with_frame_interval() {
+    let step = |elapsed: f64| {
+        compute_display_motion_blur(
+            transform(0.5, 0.5, 0.5),
+            transform(0.55, 0.5, 0.5),
+            0.0,
+            elapsed,
+            MotionBlurMode::None,
+            CENTER,
+            FULL,
+        )
+    };
+    // The same displacement over twice the media time is half the velocity, so
+    // a 30 FPS preview must not smear twice as far as a 60 FPS one.
+    let fast = step(FRAME_60);
+    let slow = step(FRAME_30);
+
+    assert!((fast.movement_uv.x - slow.movement_uv.x * 2.0).abs() < 1e-5);
+}
+
+#[test]
+fn keeps_discontinuous_steps_sharp() {
+    let step = |previous_seconds: f64, current_seconds: f64| {
+        compute_display_motion_blur(
+            transform(0.5, 0.5, 0.5),
+            transform(0.7, 0.5, 0.5),
+            previous_seconds,
+            current_seconds,
+            MotionBlurMode::None,
+            CENTER,
+            FULL,
+        )
+    };
+
+    // A repeat, a rewind, and a jump are all discontinuities, not velocity.
+    assert_eq!(step(1.0, 1.0).mode, MotionBlurMode::None);
+    assert_eq!(step(1.0, 0.9).mode, MotionBlurMode::None);
+    assert_eq!(step(1.0, 6.0).mode, MotionBlurMode::None);
 }
 
 #[test]

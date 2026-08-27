@@ -134,6 +134,12 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 - Existing viewport navigation is owned by the GPUI canvas: wheel zoom,
   middle-button pan, fit/reset, aspect-ratio preservation, and cursor overlay
   transforms stay in the same render tree as the editor.
+- The canvas toolbar now shows a recenter control only when viewport panning
+  or zooming leaves the fitted canvas off-center or clipped; it resets the
+  editor camera without changing composition or export state.
+- Fixed composition sizing for narrow aspect presets so a recording keeps its
+  source aspect ratio when switching canvas formats or enlarging the editor
+  window.
 - Canvas composition editing now supports recording selection, pointer movement,
   proportional resize, normalized canvas padding, corner radius, shadow, and
   five aspect-ratio presets. Shared geometry drives both rendering and
@@ -203,6 +209,24 @@ Native Windows screen recorder built with GPUI, gpui-component, and
   viewport-relative ruler/tracks/zoom/playhead content. Ruler intervals and
   labels adapt to scale without overlap, and pointer-anchored timeline zoom
   preserves the timestamp under the pointer while scrolling remains bounded.
+- Adaptive timeline thumbnails now render a compact filmstrip inside the Video
+  lane. A dedicated Media Foundation source reader runs on one bounded worker,
+  seeks to representative timestamps, resizes frames to a 64px target height,
+  and returns GPUI images without using the playback decoder or seek queue.
+  Thumbnail density follows the visible timeline scale, requests visible
+  buckets before one-bucket prefetch on either side, and keeps missing images
+  asynchronous so scrubbing and zooming remain responsive.
+- Thumbnail storage is a bounded LRU (128 entries / 8 MiB estimated pixel
+  memory) keyed by source, quantized timestamp bucket, interval, and output
+  size. Generations cancel obsolete extraction work, suppress repeated failed
+  keys, and allow stale completions to be cached without invalidating a newer
+  timeline plan. Evicted GPUI images are released during the render pass, and
+  decode, resize, cache, stale, drop, and eviction metrics are logged when the
+  manager closes.
+- Thumbnail requests are associated with each playback editor and shut down
+  with its worker. The filmstrip is painted behind regions and the playhead,
+  clipped to the Video lane and timeline viewport, and remains visual-only so
+  existing track seeking and zoom-region interaction are unchanged.
 - Playback performance audit: Media Foundation NV12 conversion now runs in parallel
   across bounded worker rows, keeping decoding and conversion off the GPUI thread.
   A replaced `RenderImage` is released from the playback window during its render
@@ -322,27 +346,149 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 - `motion_blur_ms` and `blur_frames=<movement>/<zoom>` are reported in the
   playback metrics line.
 
+### Display motion blur
+
+- The exported recording layer is smeared on the GPU when the composition
+  itself moves or zooms. `compute_display_motion_blur` reads the two presented
+  transforms and their media timestamps, applies the preview-rate correction,
+  and returns a `MotionBlurDescriptor` classified as `Movement` or `Zoom`.
+- Classification compares translation against a scale change converted to its
+  equivalent edge displacement. Dead zones keep a settled composition sharp, and
+  a dominance ratio plus previous-mode hysteresis stops a transform that
+  translates and scales at once from alternating filters every frame.
+- The radial centre is the composition's own `zoom_focus`, so a cursor-targeted
+  region smears around the cursor and a centre-targeted one around the middle.
+  It is never hard-coded to the frame centre.
+- Three separate recording pixel shaders: sharp, a 21-tap directional filter
+  along the movement vector centred on each pixel, and a 13-tap radial filter
+  along the ray to the zoom focus weighted by `4(t - t²)` with interleaved
+  gradient noise against banding. Selecting a whole shader rather than
+  branching means a still frame never enters a sampling loop.
+- Export logs mean render time per classification
+  (`sharp_ms`/`movement_ms`/`zoom_ms`) so the cost of each pass is measurable
+  against sharp frames from the same run.
+- The single `Motion Blur` amount now drives three internal gains —
+  `CURSOR_MOTION_MULTIPLIER`, `DISPLAY_MOVEMENT_MULTIPLIER`, and
+  `DISPLAY_ZOOM_MULTIPLIER` — so the effects tune independently behind one
+  control.
+- Export shaders are compiled in a unit test through D3DCompile, which needs no
+  device. This caught the cursor shader's `triangle` helper colliding with a
+  reserved HLSL keyword; that shader had never compiled, so any export with a
+  visible cursor failed when the renderer was built.
+
+### Native editor export
+
+- Added the first Windows-native export path: Media Foundation Source Reader
+  GPU surfaces feed a D3D11 composition renderer and Media Foundation H.264 MP4
+  Sink Writer on a dedicated worker thread.
+- Export evaluates normalized composition state for every original-rate output
+  timestamp. The editor `CanvasView` camera is not part of this evaluation, so
+  viewport zoom and pan cannot affect exported pixels.
+- Export includes aspect-ratio output sizing, solid/gradient/image backgrounds,
+  recording position/scale, timestamped zoom regions, reconstructed cursor
+  interpolation/smoothing/click bounce, cursor-size regions, and composition
+  clipping/corner radius. Audio remains disabled.
+- The editor Export action now opens a native Windows save dialog, reports
+  progress, prevents duplicate jobs, and offers cancellation. Incomplete output
+  is written beside the destination and atomically finalized only after the
+  encoder completes.
+- Export never creates `RenderImage` values or calls GPUI image/paint APIs.
+
+### Preview compositor architecture
+
+- Added `recorder::rendering`, an independent preview-compositor subsystem with
+  no dependency on GPUI's renderer. GPUI keeps the editor shell, layout, and
+  input; this module owns GPU composition behind a platform boundary.
+- `PreviewRenderer` separates `render` from `present` so the same composition
+  can later target an encoder texture instead of a swapchain. No platform type
+  appears in its signature.
+- `CompositionState` is assembled from the existing `CompositionFrame`,
+  `CanvasBackground`, and `MotionBlurDescriptor` rather than a second
+  composition model, so preview and export keep describing a frame the same
+  way. New layers are added by extending `CompositionFrame`.
+- `PhysicalSize` and `PreviewBounds` convert GPUI's logical rectangle into
+  device pixels, rounding edges rather than sizes so a moving preview keeps a
+  stable width. `FrameQueue` is a single slot that keeps the newest valid frame
+  and rejects superseded seek generations and out-of-order decodes.
+- `backend/{windows,macos,linux}.rs` are compile-gated. macOS and Linux document
+  their intended responsibility with no speculative code and no new
+  dependencies. `available_backend` reports the legacy GPUI preview on every
+  platform until a backend can actually draw.
+- The Windows module records the audited GPUI integration constraints: GPUI
+  takes the topmost DirectComposition target for its HWND and creates the window
+  with `WS_EX_NOREDIRECTIONBITMAP`, its composition device is private, and the
+  HWND itself is reachable through the public `HasWindowHandle` implementation.
+- Same-window composition is confirmed working, so no child HWND is needed and
+  the reconstructed cursor stays in GPUI. `DirectCompositionSurface` takes the
+  unclaimed non-topmost target on GPUI's own HWND; its content composes beneath
+  GPUI, which keeps painting the toolbar, inspector, timeline, and canvas on
+  top. `RECORDER_PREVIEW_SPIKE=1` attaches a magenta surface that makes this
+  visible, and a screen scan of the running editor confirmed it.
+- The preview pipeline renders a GPU texture through that surface, reusing the
+  exporter's shader sources, shader compilation, and constant-buffer layout
+  rather than reimplementing them, so preview and export sample and transform
+  pixels through identical code. Only the render target differs: the exporter
+  draws into an offscreen texture, the preview into a swapchain back buffer.
+- `DirectCompositionSurface` implements `PreviewRenderer`, and `PlaybackView::
+  composition_state` is the single bridge from editor state to the renderer.
+  It evaluates the shared composition module at the current playhead and never
+  reads the editor camera, so workspace navigation cannot reach composited
+  output. A stand-in checkerboard with a marked corner stands in for the decoded
+  frame; swapping the source texture is all the next milestone changes.
+- Making the surface visible requires clearing three opaque layers, and missing
+  any one hides it entirely: the window appearance (GPUI's Windows backend
+  ignores `WindowOptions::window_background`, so `set_background_appearance` has
+  to be called), `gpui_component::Root`'s themed fill, and the editor's own
+  shell and preview backgrounds.
+
 ## Next
 
-- Land a composite motion-blur pass for the recording layer. The CPU half is
-  finished and tested (`MotionBlurDescriptor` carries `movement_uv`,
-  `zoom_center_uv`, and `zoom_amount`), but GPUI's scene has a closed set of
-  primitives and no custom-shader entry point, so the directional and radial
-  filters have nowhere to run. This wants the same upstream Windows GPUI
-  primitive work as external textures; do not approximate it with repeated
-  `paint_image` calls, which is the duplicate-sprite artifact the effect exists
-  to avoid.
-- Tune the motion-blur constants against real recordings: `CURSOR_MULTIPLIER`,
-  `DISPLAY_MULTIPLIER`, the movement/zoom dead zones, `MODE_DOMINANCE`, and the
-  480 px cursor motion clamp.
-
+- Verify RGB32 orientation/channel order and thumbnail quality on real Windows
+  recordings at 1080p60, 1440p60, and 3440x1440; measure timeline paint time,
+  decode latency, cache hit rate, and memory while repeatedly zooming and
+  reopening projects.
+- Tune the filmstrip lane height and thumbnail interval thresholds against
+  short and several-minute recordings, including rapid pointer-wheel zoom, and
+  confirm the bounded worker exits cleanly when an editor closes mid-decode.
+- If runtime testing exposes color-conversion or source-reader compatibility
+  gaps, add a small fixture-backed thumbnail decoder test or enable only the
+  required Media Foundation video-processing path without changing playback.
+- Track the preview rectangle across resize, DPI change, monitor moves, and
+  minimise/restore, so the surface follows the rectangle GPUI assigns instead of
+  the one it was created with.
+- Feed decoded frames to the preview surface: `export::decoder` already yields
+  `ID3D11Texture2D` with no CPU readback, so the remaining work is sharing one
+  device between the decoder and the surface and replacing the stand-in texture.
+  The preview's NV12 to BGRA conversion and its `RenderImage` uploads retire
+  with it.
+- Fold the exporter's draw loop into the preview pipeline once the preview
+  composes a real frame, so one compositor serves both targets.
+- Remove the probe module and its three background overrides once the backend
+  owns the surface.
+- Reuse `export::decoder`'s GPU path for preview once the surface exists: it
+  already configures `MF_SOURCE_READER_D3D_MANAGER` with hardware transforms and
+  reads `ID3D11Texture2D` from `IMFDXGIBuffer`, so the preview's CPU NV12 to
+  BGRA conversion can be retired without new decoder work.
+- Measure presented FPS, CPU, and GPU for the native path against the current
+  `RenderImage` path at 1920x1080, 2560x1440, and 3440x1440.
+- Carry display motion blur into the editor preview. The descriptor is already
+  computed and reset per presented frame there, but GPUI's scene has a closed
+  set of primitives and no custom-shader entry point, so the directional and
+  radial filters have nowhere to run in the preview. This wants the same
+  upstream Windows GPUI primitive work as external textures; do not approximate
+  it with repeated `paint_image` calls, which is the duplicate-sprite artifact
+  the effect exists to avoid.
+- Tune the motion-blur constants against exported recordings: the three
+  multipliers, the movement/zoom dead zones, `MODE_DOMINANCE`, `MAX_MOVEMENT_UV`,
+  `MAX_ZOOM_AMOUNT`, the shader's `MAX_ZOOM_RAY_UV`, and the 480 px cursor clamp.
 - Resolve the in-flight `CaptureItem`/`Send` break around
   `start_free_threaded` in the capture worker (concurrent capture work, not UI).
 - Show a live elapsed-time readout next to the record action while recording.
 - Add hover tooltips to the record and refresh actions.
 - Populate the remaining inspector sections with editor controls as those
   systems mature (each new control should persist through `.recproj`).
-- Add an export workflow after the editor state has a stable representation.
+- Extend export with a true GPU shadow pass, fixture-backed frame comparisons,
+  and the first future overlay layer.
 - Verify and tune cursor edge behavior across multi-monitor recordings.
 - Add fixture-backed decoder tests for frame orientation, duration, and seeking.
 - Add fixture-backed playback performance coverage for the bounded conversion path,
@@ -375,6 +521,8 @@ Native Windows screen recorder built with GPUI, gpui-component, and
   preserving automatic generation and manual-region protection.
 - Add explicit reset and clear actions for canvas composition settings and
   background images.
+- Verify the recenter control around window resizing, aspect-ratio changes,
+  and reopened projects with saved viewport navigation.
 - Verify compact alert layout at narrow home and playback window sizes.
 - Show an autosave indicator ("All changes saved") in the editor toolbar.
 - Surface additional user-actionable diagnostics only where they have a clear
@@ -386,7 +534,7 @@ Native Windows screen recorder built with GPUI, gpui-component, and
   covers key event bubbling and capture.
 
 ## Later
-
+- Add macos and linux recording support.
 - Let users rename projects (updates `<folder>.recproj` naming and home list
   labels) when the project workflow expands beyond the current dedicated
   playback window.

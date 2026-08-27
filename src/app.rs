@@ -92,14 +92,14 @@ pub(crate) fn run() {
             })
             .expect("failed to open recorder window");
 
-            if let Some(video_path) = debug_video {
-                if let Err(error) = crate::recorder::open_debug_video(cx, video_path) {
-                    tracing::error!(
-                        target: "recorder::playback",
-                        error = %error,
-                        "could not open debug playback video"
-                    );
-                }
+            if let Some(video_path) = debug_video
+                && let Err(error) = crate::recorder::open_debug_video(cx, video_path)
+            {
+                tracing::error!(
+                    target: "recorder::playback",
+                    error = %error,
+                    "could not open debug playback video"
+                );
             }
         })
         .detach();

@@ -1,4 +1,4 @@
-use super::{CanvasHit, hit_test, preview_geometry};
+use super::{CanvasHit, hit_test, needs_recenter, preview_geometry};
 use crate::recorder::project_settings::{AspectRatioPreset, CanvasComposition, CanvasView};
 use gpui::{Bounds, point, px, size};
 
@@ -156,4 +156,98 @@ fn recording_transform_ignores_editor_camera() {
     assert!((resting.center.y - navigated.center.y).abs() < 1e-4);
     assert!((resting.size.x - navigated.size.x).abs() < 1e-4);
     assert!((resting.size.y - navigated.size.y).abs() < 1e-4);
+}
+
+#[test]
+fn recording_aspect_survives_canvas_resize_and_presets() {
+    let stages = [
+        Bounds::new(point(px(1000.0), px(80.0)), size(px(1000.0), px(600.0))),
+        Bounds::new(point(px(40.0), px(20.0)), size(px(1600.0), px(1000.0))),
+    ];
+    let presets = [
+        AspectRatioPreset::Widescreen,
+        AspectRatioPreset::Standard,
+        AspectRatioPreset::Square,
+        AspectRatioPreset::Portrait,
+        AspectRatioPreset::Vertical,
+    ];
+
+    for stage in stages {
+        for preset in presets {
+            let composition = CanvasComposition {
+                aspect_ratio: preset,
+                ..CanvasComposition::default()
+            };
+            let geometry = preview_geometry(
+                stage,
+                CanvasView::default(),
+                &composition,
+                1920,
+                1080,
+                None,
+                None,
+            );
+            let recording = geometry.recording_layer.size;
+            let actual = recording.width.as_f32() / recording.height.as_f32();
+
+            assert!((actual - 1920.0 / 1080.0).abs() < 0.0001);
+        }
+    }
+}
+
+#[test]
+fn editor_camera_produces_no_display_motion_blur() {
+    use crate::recorder::motion_blur::{
+        MotionBlurMode, MotionBlurSettings, compute_display_motion_blur,
+    };
+
+    let stage = Bounds::new(point(px(0.0), px(0.0)), size(px(1000.0), px(600.0)));
+    let composition = CanvasComposition::default();
+    let framed = |view| preview_geometry(stage, view, &composition, 1920, 1080, None, None);
+
+    let resting = framed(CanvasView::default())
+        .recording_transform
+        .expect("canvas has area");
+    let navigated = framed(CanvasView {
+        zoom: 3.0,
+        pan_x: -200.0,
+        pan_y: 90.0,
+    })
+    .recording_transform
+    .expect("canvas has area");
+
+    // Panning and zooming the workspace between two frames is navigation, not
+    // composition movement, so it must classify as no motion at all.
+    let blur = compute_display_motion_blur(
+        resting,
+        navigated,
+        0.0,
+        1.0 / 60.0,
+        MotionBlurMode::None,
+        crate::recorder::motion_blur::Vec2::new(0.5, 0.5),
+        MotionBlurSettings { amount: 1.0 },
+    );
+
+    assert_eq!(blur.mode, MotionBlurMode::None);
+}
+
+#[test]
+fn recenter_is_needed_for_panning_or_clipping() {
+    assert!(!needs_recenter(CanvasView::default()));
+    assert!(!needs_recenter(CanvasView {
+        zoom: 0.75,
+        ..CanvasView::default()
+    }));
+    assert!(needs_recenter(CanvasView {
+        zoom: 1.1,
+        ..CanvasView::default()
+    }));
+    assert!(needs_recenter(CanvasView {
+        pan_x: 1.0,
+        ..CanvasView::default()
+    }));
+    assert!(needs_recenter(CanvasView {
+        pan_y: -1.0,
+        ..CanvasView::default()
+    }));
 }

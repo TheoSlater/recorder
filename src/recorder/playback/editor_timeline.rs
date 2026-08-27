@@ -3,6 +3,7 @@ use std::{cell::RefCell, rc::Rc};
 use gpui::*;
 use gpui_component::ActiveTheme as _;
 
+use super::super::thumbnails::{self, TimelineViewport};
 use super::super::zoom::{CursorSizeRegion, ZoomRegion};
 use super::{PlaybackView, editor_timeline_canvas::TimelineCanvas};
 
@@ -368,6 +369,22 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         state = state.clamped_to_bounds(bounds);
     }
     let bounds_slot = view.timeline_bounds.clone();
+    let viewport_width = view
+        .timeline_bounds
+        .borrow()
+        .map_or(DEFAULT_RULER_VIEWPORT_WIDTH, |bounds| {
+            bounds.size.width.as_f32()
+        });
+    let thumbnail_plan = thumbnails::plan(
+        TimelineViewport {
+            duration_us: state.duration_us,
+            scroll_us: state.scroll_us,
+            pixels_per_second: state.pixels_per_second,
+            width_px: viewport_width,
+        },
+        thumbnails::thumbnail_size(view.video_width, view.video_height),
+    );
+    let thumbnail_strip = view.thumbnail_manager.request(&thumbnail_plan);
     let canvas = TimelineCanvas::new(
         state,
         bounds_slot,
@@ -377,6 +394,7 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         view.selected_cursor_size_region,
         view.hovered_zoom_hit,
         view.hovered_cursor_size_hit,
+        thumbnail_strip,
         cx.theme().background,
         cx.theme().popover,
         cx.theme().border,
@@ -387,12 +405,6 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
     .size_full();
     let muted = cx.theme().muted_foreground;
     let scale_color = cx.theme().popover_foreground;
-    let viewport_width = view
-        .timeline_bounds
-        .borrow()
-        .map_or(DEFAULT_RULER_VIEWPORT_WIDTH, |bounds| {
-            bounds.size.width.as_f32()
-        });
     let labels = state.labels(viewport_width);
     let zoom_scale_labels = render_zoom_scale_labels(
         &state,

@@ -124,7 +124,7 @@ allocates a tile when the `RenderImage` ID is new, and calls D3D11
 `UpdateSubresource` with the CPU bytes. The metric is therefore named
 canvas-submitted/presented in the app, not a hardware-present timestamp.
 
-## Isolated native D3D11 prototype decision
+## GPUI preview limitation and future playback path
 
 The ideal Windows architecture is:
 
@@ -177,11 +177,12 @@ boundary: verify hardware-backed samples on the renderer device, then use a
 small GPU conversion surface (video processor or shader) and a bounded
 decoder-owned texture ring. It must not copy NV12 back to CPU.
 
-The current application does not set `MF_SOURCE_READER_D3D_MANAGER`, does not
-create an `IMFDXGIDeviceManager`, and does not inspect `IMFDXGIBuffer`; its
-current Source Reader output is therefore CPU-readable NV12, not verified
-hardware-backed video. No claim of hardware decode or zero-copy behavior is
-made for this build.
+The current playback path does not set `MF_SOURCE_READER_D3D_MANAGER`, does
+not create an `IMFDXGIDeviceManager`, and does not inspect `IMFDXGIBuffer`; its
+Source Reader output is therefore CPU-readable NV12. The independent export
+path does use those D3D-aware Media Foundation interfaces and obtains
+GPU-backed ARGB32 surfaces for native composition. No zero-copy claim is made
+for the GPUI preview.
 
 The practical alternatives are a small maintained GPUI fork/patch, an
 upstream GPUI external-texture API, or a separate native video child/visual
@@ -191,6 +192,31 @@ they still require the GPUI renderer to import and synchronize the resource.
 The recommended next step is a focused GPUI Windows patch and an independent
 texture smoke test against that patch before connecting Media Foundation.
 
-The CPU `RenderImage` path remains the known-good fallback. Native D3D11
-import is recorded as a future GPUI/upstream milestone rather than being
-claimed as zero-copy in the current build.
+The CPU `RenderImage` path remains the known-good GPUI preview path. Native
+D3D11 import for interactive playback is recorded as a future GPUI/upstream
+milestone; it is not needed by, or shared with, the native export worker.
+
+## Native editor export
+
+Export is intentionally independent from the GPUI preview path:
+
+`Media Foundation Source Reader (D3D11 ARGB32) → CompositionFrame evaluation → D3D11 render target → Media Foundation H.264 Sink Writer`
+
+The export worker owns COM, Media Foundation, the D3D11 device, decoder
+surfaces, composition shaders, and encoder samples. It evaluates one output
+frame at each original recording timestamp and waits for each render/write
+operation, so slow rendering cannot drop export frames or change the result.
+The output target is finalized atomically only after `IMFSinkWriter::Finalize`
+succeeds. No `RenderImage`, GPUI image atlas, or `Window::paint_image` is used.
+
+Source video and composition pixels stay GPU-backed through decode and render.
+The selected background image is the one deliberate CPU boundary: it is read
+and decoded once with the `image` crate, uploaded to a D3D11 shader resource,
+and reused for all frames. Cursor telemetry and project JSON are also loaded
+once on the worker before frame evaluation.
+
+The first renderer supports solid, gradient, and cover-cropped image
+backgrounds; recording transforms; timestamped zoom; reconstructed cursor
+shapes; cursor sizing/bounce; and rounded recording clipping. Shadow rendering
+and future overlay layers are still pending. The renderer is separate from
+playback and does not change the documented GPUI D3D11 preview limitation.

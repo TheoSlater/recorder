@@ -1,4 +1,6 @@
-use super::{MotionBlurDescriptor, MotionBlurMode, Vec2};
+use super::{
+    MotionBlurDescriptor, MotionBlurMode, MotionBlurSettings, Vec2, fps_scale, frame_delta,
+};
 
 /// Ignore sub-pixel drift so a still composition stays perfectly sharp.
 /// Expressed as a fraction of the canvas, matching [`RecordingTransform`].
@@ -55,23 +57,35 @@ impl RecordingTransform {
 
 /// Classifies one inter-frame transform change as movement, zoom, or neither.
 ///
+/// The two timestamps are the media times of the frames the transforms belong
+/// to. Elapsed time is read from them rather than assumed, so a 24, 30, or
+/// 60 FPS preview — and an export at the recording's own rate — all produce a
+/// comparable smear instead of one that scales with the frame interval.
+///
 /// `previous_mode` is the mode chosen for the last presented frame and only
 /// breaks ties, so a transform that both translates and scales keeps a stable
-/// filter instead of alternating.
+/// filter instead of alternating every frame.
 pub(crate) fn compute_display_motion_blur(
     previous: RecordingTransform,
     current: RecordingTransform,
+    previous_seconds: f64,
+    current_seconds: f64,
     previous_mode: MotionBlurMode,
     zoom_center_uv: Vec2,
-    strength: f32,
+    settings: MotionBlurSettings,
 ) -> MotionBlurDescriptor {
     let inactive = MotionBlurDescriptor {
         zoom_center_uv,
         ..MotionBlurDescriptor::inactive()
     };
-    if !strength.is_finite() || strength <= 0.0 {
+    let settings = settings.normalized();
+    if settings.is_disabled() {
         return inactive;
     }
+    let Some(elapsed) = frame_delta(previous_seconds, current_seconds) else {
+        return inactive;
+    };
+    let fps_scale = fps_scale(elapsed);
 
     let displacement = current.center - previous.center;
     let scale_ratio = current.scale_ratio_from(&previous);
@@ -88,6 +102,7 @@ pub(crate) fn compute_display_motion_blur(
 
     match dominant_mode(movement_extent, zoom_extent, previous_mode) {
         MotionBlurMode::Movement => {
+            let strength = settings.movement_strength(fps_scale);
             // Canvas-space displacement becomes recording-layer UV by dividing
             // through the layer's own extent: moving a small layer by a tenth
             // of the canvas smears far more of its content than moving a
@@ -106,13 +121,16 @@ pub(crate) fn compute_display_motion_blur(
                 strength,
             }
         }
-        MotionBlurMode::Zoom => MotionBlurDescriptor {
-            mode: MotionBlurMode::Zoom,
-            movement_uv: Vec2::ZERO,
-            zoom_center_uv,
-            zoom_amount: (zoom_delta * strength).clamp(-MAX_ZOOM_AMOUNT, MAX_ZOOM_AMOUNT),
-            strength,
-        },
+        MotionBlurMode::Zoom => {
+            let strength = settings.zoom_strength(fps_scale);
+            MotionBlurDescriptor {
+                mode: MotionBlurMode::Zoom,
+                movement_uv: Vec2::ZERO,
+                zoom_center_uv,
+                zoom_amount: (zoom_delta * strength).clamp(-MAX_ZOOM_AMOUNT, MAX_ZOOM_AMOUNT),
+                strength,
+            }
+        }
         MotionBlurMode::None => inactive,
     }
 }

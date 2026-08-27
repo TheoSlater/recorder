@@ -16,6 +16,7 @@ use gpui_component::{
     slider::{SliderEvent, SliderState},
 };
 
+use super::super::export::{self, ExportEvent, ExportRequest};
 use super::super::{
     alerts::{AlertQueue, AppAlert},
     cursor::CursorOverlay,
@@ -26,12 +27,12 @@ use super::super::{
         CanvasBackgroundKind, CanvasComposition, CanvasView, MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM,
         ProjectSettings,
     },
+    thumbnails::ThumbnailManager,
     zoom::{
         CursorSizeRegion, MAX_ZOOM_REGION_SCALE, MIN_CURSOR_SIZE_REGION_DURATION_US,
         MIN_ZOOM_REGION_DURATION_US, ZoomRegion, ZoomTarget, cursor_scale_at,
     },
 };
-use super::super::export::{self, ExportEvent, ExportRequest};
 use super::{
     editor_canvas, editor_canvas_controls, editor_canvas_geometry,
     editor_motion_state::{MotionBlurState, PresentedFrame},
@@ -83,6 +84,7 @@ pub(crate) struct PlaybackView {
     pub(super) cursor_frame: Option<super::super::cursor::CursorFrame>,
     pub(super) cursor_images: [Arc<RenderImage>; 2],
     pub(super) motion_blur: MotionBlurState,
+    pub(super) preview_spike: super::preview_spike::PreviewSpike,
     pub(super) image: Option<Arc<RenderImage>>,
     pub(super) video_width: u32,
     pub(super) video_height: u32,
@@ -100,6 +102,8 @@ pub(crate) struct PlaybackView {
     last_preview_slot: Option<u64>,
     pub(super) timeline: editor_timeline::TimelineState,
     pub(super) timeline_bounds: editor_timeline::TimelineBounds,
+    pub(super) thumbnail_manager: ThumbnailManager,
+    thumbnail_task: Option<Task<()>>,
     pub(super) selected_zoom_region: Option<usize>,
     pub(super) selected_cursor_size_region: Option<usize>,
     pub(super) hovered_zoom_hit: Option<editor_timeline::ZoomHit>,
@@ -129,6 +133,16 @@ pub(super) struct ExportState {
     pub(super) total: u64,
 }
 
+impl Drop for PlaybackView {
+    fn drop(&mut self) {
+        if let Some(state) = &self.export_state {
+            state
+                .cancel
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
 impl PlaybackView {
     pub(super) fn new(
         video_path: PathBuf,
@@ -152,6 +166,14 @@ impl PlaybackView {
         let cursor_images = super::load_cursor_images(cx)?;
         let (player, time_events) = build_player(&video_path)?;
         let metrics = player.metrics();
+        let thumbnail_manager = ThumbnailManager::new(video_path.clone()).unwrap_or_else(|error| {
+            tracing::warn!(
+                target: "recorder::thumbnails",
+                error = %error,
+                "could not start thumbnail worker"
+            );
+            ThumbnailManager::disabled(video_path.clone())
+        });
         let save_queue = ProjectSaveQueue::new(project_path.clone());
         Ok(Self {
             player: Some(player),
@@ -173,6 +195,7 @@ impl PlaybackView {
             cursor_frame: None,
             cursor_images,
             motion_blur: MotionBlurState::default(),
+            preview_spike: super::preview_spike::PreviewSpike::default(),
             image: None,
             video_width: 0,
             video_height: 0,
@@ -190,6 +213,8 @@ impl PlaybackView {
             last_preview_slot: None,
             timeline: editor_timeline::TimelineState::default(),
             timeline_bounds: Rc::new(RefCell::new(None)),
+            thumbnail_manager,
+            thumbnail_task: None,
             selected_zoom_region: None,
             selected_cursor_size_region: None,
             hovered_zoom_hit: None,
@@ -254,6 +279,7 @@ impl PlaybackView {
             cursor_frame: None,
             cursor_images,
             motion_blur: MotionBlurState::default(),
+            preview_spike: super::preview_spike::PreviewSpike::default(),
             image: None,
             video_width: 0,
             video_height: 0,
@@ -271,6 +297,8 @@ impl PlaybackView {
             last_preview_slot: None,
             timeline: editor_timeline::TimelineState::default(),
             timeline_bounds: Rc::new(RefCell::new(None)),
+            thumbnail_manager: ThumbnailManager::disabled(PathBuf::new()),
+            thumbnail_task: None,
             selected_zoom_region: None,
             selected_cursor_size_region: None,
             hovered_zoom_hit: None,
@@ -307,6 +335,7 @@ impl PlaybackView {
     ) {
         self.telemetry_path = telemetry_path.clone();
         self.metadata_path = metadata_path.clone();
+        self.start_thumbnail_listener(cx);
         if self.project_settings.canvas_composition.background.kind == CanvasBackgroundKind::Image {
             self.start_background_image_load(
                 self.project_settings
@@ -400,6 +429,37 @@ impl PlaybackView {
             }
         })
         .detach();
+    }
+
+    fn start_thumbnail_listener(&mut self, cx: &mut Context<Self>) {
+        if !self.thumbnail_manager.is_running() {
+            return;
+        }
+        let events = self.thumbnail_manager.events();
+        self.thumbnail_task = Some(cx.spawn(async move |view, cx| {
+            loop {
+                let events_for_wait = events.clone();
+                let Some(event) = cx
+                    .background_spawn(async move { events_for_wait.recv().ok() })
+                    .await
+                else {
+                    break;
+                };
+                let mut batch = Vec::with_capacity(4);
+                batch.push(event);
+                batch.extend(events.try_iter());
+                if view
+                    .update(cx, |view, cx| {
+                        if view.thumbnail_manager.apply_events(batch) {
+                            cx.notify();
+                        }
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        }));
     }
 
     pub(super) fn export_or_cancel(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -673,6 +733,37 @@ impl PlaybackView {
                 view.set_canvas_color(CanvasColor::GradientEnd, *color, cx);
             },
         ));
+    }
+
+    /// Describes the current frame for the preview compositor.
+    ///
+    /// This is the whole bridge from editor state to the renderer: everything
+    /// time-dependent is evaluated by the shared composition module, and the
+    /// editor camera is deliberately absent, so navigating the workspace cannot
+    /// reach the composited output.
+    pub(super) fn composition_state(
+        &self,
+        output_size: super::super::rendering::PhysicalSize,
+    ) -> Option<super::super::rendering::CompositionState> {
+        let source = super::super::composition::SourceSize {
+            width: self.video_width,
+            height: self.video_height,
+        };
+        if !source.valid() {
+            return None;
+        }
+        Some(super::super::rendering::CompositionState::new(
+            output_size,
+            source,
+            super::super::composition::evaluate(
+                &self.project_settings,
+                source,
+                self.timeline.playhead_us,
+                self.cursor_frame,
+            ),
+            self.project_settings.canvas_composition.background.clone(),
+            self.motion_blur.display(),
+        ))
     }
 
     fn canvas_geometry(&self) -> Option<editor_canvas_geometry::CanvasGeometry> {
@@ -1079,6 +1170,13 @@ impl PlaybackView {
     }
 
     fn update_motion_blur(&mut self, seconds: f64) {
+        // A scrub jumps the playhead between presented frames. Seek generations
+        // already cover most of that, but sub-frame drag steps are coalesced
+        // rather than published, so dragging is made sharp explicitly.
+        if self.timeline.scrubbing() {
+            self.reset_motion_blur();
+            return;
+        }
         let started = Instant::now();
         let released = self.motion_blur.present(PresentedFrame {
             seconds,
@@ -2038,6 +2136,10 @@ impl PlaybackView {
         self.adjust_canvas_zoom_at(amount, None, cx);
     }
 
+    pub(super) fn canvas_needs_recenter(&self) -> bool {
+        editor_canvas_geometry::needs_recenter(self.project_settings.canvas)
+    }
+
     pub(super) fn reset_canvas_view(&mut self, cx: &mut Context<Self>) {
         self.set_canvas_view(CanvasView::default(), cx);
     }
@@ -2310,6 +2412,13 @@ impl Render for PlaybackView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let metrics = self.metrics.clone();
         self.motion_blur.set_scale_factor(window.scale_factor());
+        let stage = *self.canvas_bounds.borrow();
+        if let Some(stage) = stage {
+            super::preview_spike::attach(self, window, stage);
+        }
+        for image in self.thumbnail_manager.take_image_releases() {
+            let _ = window.drop_image(image);
+        }
         for image in self.pending_image_releases.drain(..) {
             let release_started = Instant::now();
             let _ = window.drop_image(image);

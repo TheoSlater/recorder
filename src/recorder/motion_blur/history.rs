@@ -1,12 +1,7 @@
 use super::{
     CursorMotion, CursorPoint, MotionBlurDescriptor, MotionBlurMode, MotionBlurSettings,
-    RecordingTransform, Vec2, compute_display_motion_blur, fps_scale,
+    RecordingTransform, Vec2, compute_display_motion_blur, fps_scale, frame_delta,
 };
-
-/// Largest media-time step still treated as continuous playback. Anything
-/// longer is a jump — a seek that reused the current generation, a stall, a
-/// replay from the end — and its first frame is rendered sharp.
-const MAX_FRAME_GAP_SECONDS: f64 = 0.25;
 
 /// One frame that was actually presented to the preview.
 ///
@@ -95,10 +90,7 @@ fn measure(
     sample: &FrameSample,
     settings: MotionBlurSettings,
 ) -> Option<MotionBlurFrame> {
-    let delta_seconds = sample.seconds - previous.seconds;
-    if !delta_seconds.is_finite() || delta_seconds <= 0.0 || delta_seconds > MAX_FRAME_GAP_SECONDS {
-        return None;
-    }
+    let delta_seconds = frame_delta(previous.seconds, sample.seconds)?;
     let fps_scale = fps_scale(delta_seconds);
 
     // A cursor that appeared, disappeared, or left the surface has no velocity
@@ -118,9 +110,11 @@ fn measure(
             compute_display_motion_blur(
                 previous_transform,
                 current,
+                previous.seconds,
+                sample.seconds,
                 previous.mode,
                 sample.zoom_center_uv,
-                settings.display_strength(fps_scale),
+                settings,
             )
         })
         .unwrap_or_else(|| MotionBlurDescriptor {

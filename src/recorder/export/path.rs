@@ -34,7 +34,10 @@ pub(crate) fn choose(suggested_name: &str) -> Result<Option<PathBuf>> {
     if !unsafe { GetSaveFileNameW(&mut dialog) }.as_bool() {
         return Ok(None);
     }
-    let end = file.iter().position(|value| *value == 0).unwrap_or(file.len());
+    let end = file
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file.len());
     let path = PathBuf::from(String::from_utf16_lossy(&file[..end]));
     Ok((!path.as_os_str().is_empty()).then_some(path))
 }

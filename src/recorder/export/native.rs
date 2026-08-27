@@ -6,19 +6,24 @@ use std::{
 use anyhow::{Result, bail};
 use crossbeam_channel::Sender;
 
-use super::{
-    ExportEvent, ExportRequest, finalize_temporary, is_cancelled, remove_temporary,
-    send_terminal, temporary_path,
-};
 use super::super::{
     composition::{self, OutputSize},
     cursor::CursorOverlay,
+    motion_blur::{
+        MotionBlurDescriptor, MotionBlurMode, RecordingTransform, compute_display_motion_blur,
+    },
     project_settings::ProjectSettings,
     zoom::cursor_scale_at,
 };
-use super::{decoder::{self, Decoder}, encoder::Encoder, renderer::Renderer};
-
-const MEDIA_TIME_PER_SECOND: u64 = 10_000_000;
+use super::{
+    ExportEvent, ExportRequest, finalize_temporary, is_cancelled, remove_temporary, send_terminal,
+    temporary_path,
+};
+use super::{
+    decoder::{self, Decoder},
+    encoder::Encoder,
+    renderer::Renderer,
+};
 
 pub(crate) fn run(
     request: ExportRequest,
@@ -76,39 +81,133 @@ fn run_inner(
     if decoder.duration_100ns == 0 || total == 0 {
         bail!("recording duration is unavailable");
     }
-    let _ = events.try_send(ExportEvent::Progress { completed: 0, total });
+    let _ = events.try_send(ExportEvent::Progress {
+        completed: 0,
+        total,
+    });
+
+    // Export renders every frame in order, so the previous frame is always the
+    // one before this in the finished video: exactly the pair display motion
+    // blur must measure between.
+    let mut previous: Option<PreviousFrame> = None;
+    let mut cost = RenderCost::default();
 
     for index in 0..total {
         if is_cancelled(cancel) {
             return Ok(false);
         }
-        let timestamp = decoder.frame_rate.timestamp(index).min(
-            decoder
-                .duration_100ns
-                .saturating_sub(decoder.frame_rate.duration_100ns()),
-        );
+        let timestamp = decoder.frame_rate.timestamp(index);
+        let seconds = timestamp as f64 / 10_000_000.0;
         let source_frame = decoder.frame_at(timestamp)?;
         let cursor_frame = cursor_frame(&cursor, &settings, timestamp);
-        let composition = composition::evaluate(
-            &settings,
-            source,
-            timestamp / 10,
-            cursor_frame,
-        );
+        let composition = composition::evaluate(&settings, source, timestamp / 10, cursor_frame);
+        let transform = composition.recording_transform();
+        let motion = previous
+            .zip(transform)
+            .map(|(previous, current)| {
+                compute_display_motion_blur(
+                    previous.transform,
+                    current,
+                    previous.seconds,
+                    seconds,
+                    previous.mode,
+                    composition.zoom_center(),
+                    settings.motion_blur,
+                )
+            })
+            .unwrap_or_else(MotionBlurDescriptor::inactive);
+        previous = transform.map(|transform| PreviousFrame {
+            transform,
+            seconds,
+            mode: motion.mode,
+        });
+
+        let render_started = std::time::Instant::now();
         let rendered = renderer.render(
             &source_frame.texture,
             &composition,
             source,
             &settings.canvas_composition,
+            motion,
         )?;
-        encoder.write(rendered, timestamp)?;
+        cost.record(motion.mode, render_started.elapsed());
+        encoder.write(
+            &rendered,
+            timestamp,
+            decoder.frame_rate.frame_duration(index),
+        )?;
         if is_cancelled(cancel) {
             return Ok(false);
         }
-        let _ = events.try_send(ExportEvent::Progress { completed: index + 1, total });
+        let _ = events.try_send(ExportEvent::Progress {
+            completed: index + 1,
+            total,
+        });
     }
     encoder.finish()?;
+    cost.log();
     Ok(true)
+}
+
+#[derive(Clone, Copy)]
+struct PreviousFrame {
+    transform: RecordingTransform,
+    seconds: f64,
+    mode: MotionBlurMode,
+}
+
+/// Render time split by how each frame was classified, so the cost of the
+/// directional and radial passes can be read against sharp frames from the
+/// same export rather than a separate benchmark.
+#[derive(Default)]
+struct RenderCost {
+    sharp: ModeCost,
+    movement: ModeCost,
+    zoom: ModeCost,
+}
+
+#[derive(Default)]
+struct ModeCost {
+    frames: u64,
+    total: std::time::Duration,
+}
+
+impl ModeCost {
+    fn record(&mut self, elapsed: std::time::Duration) {
+        self.frames += 1;
+        self.total += elapsed;
+    }
+
+    fn average_ms(&self) -> f64 {
+        if self.frames == 0 {
+            0.0
+        } else {
+            self.total.as_secs_f64() * 1_000.0 / self.frames as f64
+        }
+    }
+}
+
+impl RenderCost {
+    fn record(&mut self, mode: MotionBlurMode, elapsed: std::time::Duration) {
+        match mode {
+            MotionBlurMode::None => self.sharp.record(elapsed),
+            MotionBlurMode::Movement => self.movement.record(elapsed),
+            MotionBlurMode::Zoom => self.zoom.record(elapsed),
+        }
+    }
+
+    fn log(&self) {
+        tracing::info!(
+            target: "recorder::export",
+            sharp_frames = self.sharp.frames,
+            sharp_ms = self.sharp.average_ms(),
+            movement_frames = self.movement.frames,
+            movement_ms = self.movement.average_ms(),
+            zoom_frames = self.zoom.frames,
+            zoom_ms = self.zoom.average_ms(),
+            "export render cost by motion blur mode"
+        );
+    }
 }
 
 fn cursor_frame(
@@ -119,20 +218,5 @@ fn cursor_frame(
     let timestamp_us = timestamp_100ns / 10;
     let mut cursor = settings.cursor;
     cursor.scale = cursor_scale_at(&settings.cursor_size_regions, timestamp_us, cursor.scale);
-    overlay.frame_at(seconds_from_timestamp(timestamp_100ns), cursor)
-}
-
-fn seconds_from_timestamp(timestamp_100ns: u64) -> f64 {
-    timestamp_100ns as f64 / MEDIA_TIME_PER_SECOND as f64
-}
-
-#[cfg(test)]
-mod tests {
-    use super::seconds_from_timestamp;
-
-    #[test]
-    fn cursor_timestamp_uses_media_timebase() {
-        assert_eq!(seconds_from_timestamp(12_500_000), 1.25);
-        assert_eq!(seconds_from_timestamp(1), 0.0000001);
-    }
+    overlay.frame_at_timestamp(timestamp_100ns, cursor)
 }

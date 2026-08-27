@@ -3,27 +3,24 @@ use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
 use windows::{
+    Win32::Graphics::Direct3D11::ID3D11Texture2D,
     Win32::Media::MediaFoundation::{
-        IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter,
-        MFCreateAttributes, MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateSample,
-        MFCreateSinkWriterFromURL, MFMediaType_Video, MF_MT_ALL_SAMPLES_INDEPENDENT,
+        IMFAttributes, IMFMediaType, IMFSample, IMFSinkWriter, MF_MT_ALL_SAMPLES_INDEPENDENT,
         MF_MT_AVG_BITRATE, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE,
         MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE,
         MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SINK_WRITER_D3D_MANAGER,
+        MF_SINK_WRITER_DISABLE_THROTTLING, MFCreateAttributes, MFCreateDXGISurfaceBuffer,
+        MFCreateMediaType, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video,
         MFVideoFormat_ARGB32, MFVideoFormat_H264, MFVideoInterlace_Progressive,
     },
     core::{Interface, PCWSTR},
-    Win32::Graphics::Direct3D11::ID3D11Texture2D,
 };
 
 use super::decoder::{DeviceContext, FrameRate};
 
-const MEDIA_TIME_PER_SECOND: u64 = 10_000_000;
-
 pub(crate) struct Encoder {
     writer: IMFSinkWriter,
     stream: u32,
-    frame_duration_100ns: i64,
 }
 
 impl Encoder {
@@ -42,6 +39,9 @@ impl Encoder {
         unsafe {
             attributes.SetUnknown(&MF_SINK_WRITER_D3D_MANAGER, &device.manager)?;
             attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
+            // Export is offline. The default sink-writer throttle would make
+            // WriteSample wait for wall-clock playback time.
+            attributes.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
         }
 
         let path: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
@@ -51,38 +51,30 @@ impl Encoder {
         unsafe {
             output.SetUINT32(&MF_MT_AVG_BITRATE, bitrate(width, height, frame_rate))?;
         }
-        let stream = unsafe { writer.AddStream(&output) }
-            .context("could not add H.264 output stream")?;
+        let stream =
+            unsafe { writer.AddStream(&output) }.context("could not add H.264 output stream")?;
         let input = media_type(MFVideoFormat_ARGB32, width, height, frame_rate)?;
         unsafe {
             writer.SetInputMediaType(stream, &input, None::<&IMFAttributes>)?;
             writer.BeginWriting()?;
         }
-        let frame_duration_100ns = (u128::from(MEDIA_TIME_PER_SECOND)
-            * u128::from(frame_rate.denominator)
-            / u128::from(frame_rate.numerator)) as i64;
-        Ok(Self {
-            writer,
-            stream,
-            frame_duration_100ns,
-        })
+        Ok(Self { writer, stream })
     }
 
     pub(crate) fn write(
         &self,
         texture: &ID3D11Texture2D,
         timestamp_100ns: u64,
+        duration_100ns: u64,
     ) -> Result<()> {
-        let buffer = unsafe {
-            MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false)
-        }
-        .context("could not wrap rendered D3D11 frame")?;
-        let sample: IMFSample = unsafe { MFCreateSample() }
-            .context("could not create output sample")?;
+        let buffer = unsafe { MFCreateDXGISurfaceBuffer(&ID3D11Texture2D::IID, texture, 0, false) }
+            .context("could not wrap rendered D3D11 frame")?;
+        let sample: IMFSample =
+            unsafe { MFCreateSample() }.context("could not create output sample")?;
         unsafe {
             sample.AddBuffer(&buffer)?;
             sample.SetSampleTime(timestamp_100ns.min(i64::MAX as u64) as i64)?;
-            sample.SetSampleDuration(self.frame_duration_100ns)?;
+            sample.SetSampleDuration(duration_100ns.max(1).min(i64::MAX as u64) as i64)?;
             self.writer.WriteSample(self.stream, &sample)?;
         }
         Ok(())
@@ -99,7 +91,8 @@ fn media_type(
     height: u32,
     frame_rate: FrameRate,
 ) -> Result<IMFMediaType> {
-    let media_type = unsafe { MFCreateMediaType() }.context("could not create output media type")?;
+    let media_type =
+        unsafe { MFCreateMediaType() }.context("could not create output media type")?;
     unsafe {
         media_type.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         media_type.SetGUID(&MF_MT_SUBTYPE, &subtype)?;
@@ -142,7 +135,14 @@ mod tests {
 
     #[test]
     fn bitrate_stays_in_encoder_range() {
-        let rate = bitrate(1920, 1080, FrameRate { numerator: 60, denominator: 1 });
+        let rate = bitrate(
+            1920,
+            1080,
+            FrameRate {
+                numerator: 60,
+                denominator: 1,
+            },
+        );
         assert!((2_000_000..=40_000_000).contains(&rate));
     }
 }

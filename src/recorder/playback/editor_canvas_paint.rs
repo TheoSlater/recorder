@@ -4,7 +4,7 @@ use std::time::Duration;
 use gpui::*;
 
 use super::super::{
-    composition::SourceSize,
+    composition::{self, SourceSize},
     cursor::CursorFrame,
     media::{FrameTiming, PlaybackMetrics},
     project_settings::{CanvasBackgroundKind, CanvasComposition, CanvasView},
@@ -50,7 +50,9 @@ pub(super) fn paint_preview(
 ) {
     let canvas_paint_started_at = std::time::Instant::now();
     // The stage is editor chrome and is never part of the exported video.
-    window.paint_quad(fill(stage, stage_background));
+    if !super::preview_spike::hole_punched() {
+        window.paint_quad(fill(stage, stage_background));
+    }
 
     let geometry = editor_canvas_geometry::preview_geometry(
         stage,
@@ -75,7 +77,7 @@ pub(super) fn paint_preview(
                 stage_background,
             );
             linear_gradient(
-                135.0,
+                composition::CANVAS_GRADIENT_ANGLE_DEGREES,
                 linear_color_stop(start, 0.0),
                 linear_color_stop(end, 1.0),
             )

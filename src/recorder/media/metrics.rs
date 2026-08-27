@@ -38,6 +38,7 @@ impl PlaybackMetrics {
         state.last_presented = None;
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn decoded(
         &self,
         decode: Duration,

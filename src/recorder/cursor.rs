@@ -8,6 +8,8 @@ use super::{auto_zoom, zoom::ZoomRegion};
 
 mod track;
 
+const MEDIA_TIME_PER_SECOND: f64 = 10_000_000.0;
+
 pub(super) use track::{CursorEvent, CursorSample, CursorTrack};
 
 #[derive(Clone)]
@@ -62,6 +64,14 @@ impl CursorOverlay {
 
     pub(super) fn frame_at(&self, seconds: f64, settings: CursorSettings) -> Option<CursorFrame> {
         self.evaluator.frame_at(seconds, settings)
+    }
+
+    pub(super) fn frame_at_timestamp(
+        &self,
+        timestamp_100ns: u64,
+        settings: CursorSettings,
+    ) -> Option<CursorFrame> {
+        self.frame_at(timestamp_100ns as f64 / MEDIA_TIME_PER_SECOND, settings)
     }
 
     pub(super) fn auto_zoom_regions_with_report(

@@ -1,4 +1,4 @@
-use std::{mem::ManuallyDrop, os::windows::ffi::OsStrExt, path::Path};
+use std::{os::windows::ffi::OsStrExt, path::Path};
 
 use anyhow::{Context, Result, anyhow, bail};
 use windows::{
@@ -13,18 +13,17 @@ use windows::{
             },
         },
         Media::MediaFoundation::{
-            IMFDXGIBuffer, IMFDXGIDeviceManager, IMFAttributes, IMFMediaType, IMFSample,
-            IMFSourceReader, MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
-            MFCreateSourceReaderFromURL, MFMediaType_Video, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-            MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE, MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS,
-            MF_SOURCE_READER_D3D_MANAGER, MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING,
-            MF_SOURCE_READER_FIRST_VIDEO_STREAM, MF_SOURCE_READER_MEDIASOURCE,
-            MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR, MFVideoFormat_ARGB32,
+            IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample,
+            IMFSourceReader, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
+            MF_PD_DURATION, MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_SOURCE_READER_D3D_MANAGER,
+            MF_SOURCE_READER_ENABLE_ADVANCED_VIDEO_PROCESSING, MF_SOURCE_READER_FIRST_VIDEO_STREAM,
+            MF_SOURCE_READER_MEDIASOURCE, MF_SOURCE_READERF_ENDOFSTREAM, MF_SOURCE_READERF_ERROR,
+            MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateMediaType,
+            MFCreateSourceReaderFromURL, MFMediaType_Video, MFVideoFormat_ARGB32,
         },
         System::{
+            Com::StructuredStorage::{PropVariantClear, PropVariantToInt64},
             Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize},
-            Com::StructuredStorage::{PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0, PropVariantClear, PropVariantToInt64},
-            Variant::VT_I8,
         },
     },
     core::{Interface, PCWSTR},
@@ -53,9 +52,10 @@ impl FrameRate {
             / u128::from(self.numerator)) as u64
     }
 
-    pub(crate) fn duration_100ns(self) -> u64 {
-        (u128::from(MEDIA_TIME_PER_SECOND) * u128::from(self.denominator)
-            / u128::from(self.numerator)) as u64
+    pub(crate) fn frame_duration(self, index: u64) -> u64 {
+        self.timestamp(index.saturating_add(1))
+            .saturating_sub(self.timestamp(index))
+            .max(1)
     }
 }
 
@@ -86,7 +86,12 @@ pub(crate) fn initialize_media() -> Result<MediaGuards> {
     if result.is_err() {
         return Err(anyhow!("could not initialize COM: {result:?}"));
     }
-    if let Err(error) = unsafe { windows::Win32::Media::MediaFoundation::MFStartup(windows::Win32::Media::MediaFoundation::MF_VERSION, windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL) } {
+    if let Err(error) = unsafe {
+        windows::Win32::Media::MediaFoundation::MFStartup(
+            windows::Win32::Media::MediaFoundation::MF_VERSION,
+            windows::Win32::Media::MediaFoundation::MFSTARTUP_FULL,
+        )
+    } {
         unsafe { CoUninitialize() };
         return Err(anyhow!("could not initialize Media Foundation: {error}"));
     }
@@ -168,7 +173,14 @@ impl Decoder {
         let mut sample = None;
         unsafe {
             self.reader
-                .ReadSample(VIDEO_STREAM, 0, None, Some(&mut flags), Some(&mut timestamp), Some(&mut sample))
+                .ReadSample(
+                    VIDEO_STREAM,
+                    0,
+                    None,
+                    Some(&mut flags),
+                    Some(&mut timestamp),
+                    Some(&mut sample),
+                )
                 .context("could not decode recording frame")?;
         }
         if flags & MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 != 0 {
@@ -180,9 +192,11 @@ impl Decoder {
         let Some(sample) = sample else {
             return Ok(None);
         };
-        let buffer = unsafe { sample.GetBufferByIndex(0) }
-            .context("decoded frame has no media buffer")?;
-        let dxgi: IMFDXGIBuffer = buffer.cast().context("decoded frame is not a D3D11 buffer")?;
+        let buffer =
+            unsafe { sample.GetBufferByIndex(0) }.context("decoded frame has no media buffer")?;
+        let dxgi: IMFDXGIBuffer = buffer
+            .cast()
+            .context("decoded frame is not a D3D11 buffer")?;
         let texture = unsafe {
             let mut texture = None;
             dxgi.GetResource(&ID3D11Texture2D::IID, &mut texture as *mut _ as *mut _)
@@ -241,13 +255,19 @@ fn create_device() -> Result<DeviceContext> {
         .context("could not create Media Foundation D3D manager")?;
     let manager = manager.ok_or_else(|| anyhow!("Media Foundation D3D manager is null"))?;
     unsafe { manager.ResetDevice(&device, token) }.context("could not bind D3D11 device")?;
-    Ok(DeviceContext { device, context, manager })
+    Ok(DeviceContext {
+        device,
+        context,
+        manager,
+    })
 }
 
 fn create_reader(path: &Path, manager: &IMFDXGIDeviceManager) -> Result<IMFSourceReader> {
     let mut attributes = None;
-    unsafe { MFCreateAttributes(&mut attributes, 4) }.context("could not create reader attributes")?;
-    let attributes: IMFAttributes = attributes.ok_or_else(|| anyhow!("reader attributes are null"))?;
+    unsafe { MFCreateAttributes(&mut attributes, 4) }
+        .context("could not create reader attributes")?;
+    let attributes: IMFAttributes =
+        attributes.ok_or_else(|| anyhow!("reader attributes are null"))?;
     unsafe {
         attributes.SetUnknown(&MF_SOURCE_READER_D3D_MANAGER, manager)?;
         attributes.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
@@ -286,27 +306,22 @@ fn read_frame_rate(media_type: &IMFMediaType) -> Option<FrameRate> {
     let packed = unsafe { media_type.GetUINT64(&MF_MT_FRAME_RATE) }.ok()?;
     let numerator = (packed >> 32) as u32;
     let denominator = packed as u32;
-    (numerator > 0 && denominator > 0).then_some(FrameRate { numerator, denominator })
+    (numerator > 0 && denominator > 0).then_some(FrameRate {
+        numerator,
+        denominator,
+    })
 }
 
 fn read_duration(reader: &IMFSourceReader) -> Option<u64> {
-    let mut value = unsafe { reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION) }.ok()?;
+    let mut value = unsafe {
+        reader.GetPresentationAttribute(MF_SOURCE_READER_MEDIASOURCE.0 as u32, &MF_PD_DURATION)
+    }
+    .ok()?;
     let duration = unsafe { PropVariantToInt64(&value) }.ok()?.max(0) as u64;
     let _ = unsafe { PropVariantClear(&mut value) };
     Some(duration)
 }
 
-#[allow(dead_code)]
-fn media_time(value: i64) -> PROPVARIANT {
-    PROPVARIANT {
-        Anonymous: PROPVARIANT_0 {
-            Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {
-                vt: VT_I8,
-                wReserved1: 0,
-                wReserved2: 0,
-                wReserved3: 0,
-                Anonymous: PROPVARIANT_0_0_0 { hVal: value },
-            }),
-        },
-    }
-}
+#[cfg(test)]
+#[path = "decoder_tests.rs"]
+mod tests;

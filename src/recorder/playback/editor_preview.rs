@@ -110,7 +110,7 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         .self_stretch()
         .min_w(px(0.))
         .min_h(px(0.))
-        .bg(cx.theme().background)
+        .bg(super::preview_spike::background(cx.theme().background))
         .child(
             div()
                 .size_full()

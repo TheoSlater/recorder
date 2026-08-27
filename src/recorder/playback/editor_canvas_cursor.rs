@@ -24,7 +24,9 @@ pub(super) fn paint(
     let Some(cursor) = cursor.filter(|cursor| cursor.visible) else {
         return;
     };
-    let Some(sharp_bounds) = cursor_bounds(video_composition, composition_frame, source, cursor.asset) else {
+    let Some(sharp_bounds) =
+        cursor_bounds(video_composition, composition_frame, source, cursor.asset)
+    else {
         return;
     };
 

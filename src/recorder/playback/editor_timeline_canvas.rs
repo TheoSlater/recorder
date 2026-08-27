@@ -1,6 +1,7 @@
 use gpui::*;
 
 use super::super::media::PlaybackMetrics;
+use super::super::thumbnails::ThumbnailStrip;
 use super::super::zoom::{CursorSizeRegion, ZoomRegion};
 use super::editor_timeline::{
     RULER_HEIGHT, TRACK_HEIGHT, TRACK_NAMES, TimelineBounds, TimelineState, ZoomHit, content_width,
@@ -19,6 +20,7 @@ pub(super) struct TimelineCanvas {
     selected_cursor_size_region: Option<usize>,
     hovered_zoom_hit: Option<ZoomHit>,
     hovered_cursor_size_hit: Option<super::editor_timeline::CursorSizeHit>,
+    thumbnail_strip: ThumbnailStrip,
     background: Hsla,
     ruler_background: Hsla,
     border: Hsla,
@@ -38,6 +40,7 @@ impl TimelineCanvas {
         selected_cursor_size_region: Option<usize>,
         hovered_zoom_hit: Option<ZoomHit>,
         hovered_cursor_size_hit: Option<super::editor_timeline::CursorSizeHit>,
+        thumbnail_strip: ThumbnailStrip,
         background: Hsla,
         ruler_background: Hsla,
         border: Hsla,
@@ -55,6 +58,7 @@ impl TimelineCanvas {
             selected_cursor_size_region,
             hovered_zoom_hit,
             hovered_cursor_size_hit,
+            thumbnail_strip,
             background,
             ruler_background,
             border,
@@ -132,6 +136,7 @@ impl Element for TimelineCanvas {
         let selected_cursor_size_region = self.selected_cursor_size_region;
         let hovered_zoom_hit = self.hovered_zoom_hit;
         let hovered_cursor_size_hit = self.hovered_cursor_size_hit;
+        let thumbnail_strip = &self.thumbnail_strip;
         let background = self.background;
         let ruler_background = self.ruler_background;
         let border = self.border;
@@ -158,6 +163,7 @@ impl Element for TimelineCanvas {
                         selected_cursor_size_region,
                         hovered_zoom_hit,
                         hovered_cursor_size_hit,
+                        thumbnail_strip,
                         background,
                         ruler_background,
                         border,
@@ -202,6 +208,7 @@ fn paint_timeline(
     selected_cursor_size_region: Option<usize>,
     hovered_zoom_hit: Option<ZoomHit>,
     hovered_cursor_size_hit: Option<super::editor_timeline::CursorSizeHit>,
+    thumbnail_strip: &ThumbnailStrip,
     background: Hsla,
     ruler_background: Hsla,
     border: Hsla,
@@ -288,6 +295,14 @@ fn paint_timeline(
             ),
             primary.opacity(0.32),
         ));
+        super::editor_timeline_thumbnails::paint(
+            window,
+            content,
+            state,
+            thumbnail_strip,
+            border,
+            background,
+        );
         for index in 1..TRACK_NAMES.len() {
             let y = bounds.origin.y.as_f32() + track_y(index) + TRACK_HEIGHT / 2. - 1.;
             window.paint_quad(fill(

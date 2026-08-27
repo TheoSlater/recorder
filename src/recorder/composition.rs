@@ -8,12 +8,14 @@
 use super::{
     cursor::CursorFrame,
     cursor_settings::{CursorAsset, CursorStyle},
+    motion_blur::{RecordingTransform, Vec2},
     project_settings::{AspectRatioPreset, CanvasComposition, ProjectSettings},
     zoom::{ZoomEffect, ZoomTarget, effect_at},
 };
 
 const DEFAULT_OUTPUT_LONG_EDGE: u32 = 1920;
 const DEFAULT_VIDEO_ASPECT: f64 = 16.0 / 9.0;
+pub(crate) const CANVAS_GRADIENT_ANGLE_DEGREES: f32 = 135.0;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SourceSize {
@@ -109,6 +111,28 @@ pub(crate) struct CompositionFrame {
     pub(crate) shadow: bool,
 }
 
+impl CompositionFrame {
+    /// The recording layer as motion blur measures it. These values are
+    /// normalized to the output canvas and the editor camera is never read
+    /// here, so viewport pan and zoom cannot register as composition movement.
+    pub(crate) fn recording_transform(&self) -> Option<RecordingTransform> {
+        RecordingTransform::new(
+            Vec2::new(
+                (self.recording.x + self.recording.width / 2.0) as f32,
+                (self.recording.y + self.recording.height / 2.0) as f32,
+            ),
+            Vec2::new(self.recording.width as f32, self.recording.height as f32),
+        )
+    }
+
+    /// Where the active zoom is pulling towards, in recording-layer UV. This is
+    /// the focal point a radial smear has to be centred on; it follows the
+    /// cursor for cursor-targeted zooms and the layer centre otherwise.
+    pub(crate) fn zoom_center(&self) -> Vec2 {
+        Vec2::new(self.zoom_focus.0 as f32, self.zoom_focus.1 as f32)
+    }
+}
+
 /// Evaluates all time-dependent composition values for an output timestamp.
 /// `CanvasView` is intentionally not read here.
 pub(crate) fn evaluate(
@@ -179,6 +203,29 @@ pub(crate) fn cursor_rect(
     })
 }
 
+/// Returns a centered rectangle that covers a canvas of `container_aspect`
+/// with content of `content_aspect`. Both aspects are width divided by height;
+/// the returned coordinates are normalized to the canvas.
+pub(crate) fn cover_rect(container_aspect: f64, content_aspect: f64) -> NormalizedRect {
+    let container_aspect = valid_aspect(container_aspect);
+    let content_aspect = valid_aspect(content_aspect);
+    if content_aspect >= container_aspect {
+        NormalizedRect {
+            x: 0.5 - content_aspect / container_aspect / 2.0,
+            y: 0.0,
+            width: content_aspect / container_aspect,
+            height: 1.0,
+        }
+    } else {
+        NormalizedRect {
+            x: 0.0,
+            y: 0.5 - container_aspect / content_aspect / 2.0,
+            width: 1.0,
+            height: container_aspect / content_aspect,
+        }
+    }
+}
+
 fn recording_rect(
     composition: &CanvasComposition,
     source_aspect: f64,
@@ -195,10 +242,11 @@ fn recording_rect(
             available_height,
         )
     } else {
-        (
-            available_width,
-            available_pixel_width / source_aspect / output_aspect,
-        )
+        // `available_pixel_width` already includes the output aspect. Divide by
+        // the source aspect once to convert that pixel width into normalized
+        // output height; dividing by `output_aspect` again stretches narrow
+        // compositions.
+        (available_width, available_pixel_width / source_aspect)
     };
     NormalizedRect::centered(
         0.5 + composition.position_x.clamp(-1.0, 1.0),
@@ -246,91 +294,14 @@ fn even_dimension(value: u32) -> u32 {
     value.max(2) & !1
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::recorder::project_settings::ProjectSettings;
-
-    fn source() -> SourceSize {
-        SourceSize {
-            width: 1920,
-            height: 1080,
-        }
-    }
-
-    #[test]
-    fn output_dimensions_follow_aspect_and_long_edge() {
-        assert_eq!(
-            OutputSize::for_source(source(), AspectRatioPreset::Widescreen),
-            OutputSize {
-                width: 1920,
-                height: 1080
-            }
-        );
-        assert_eq!(
-            OutputSize::for_source(source(), AspectRatioPreset::Square),
-            OutputSize {
-                width: 1920,
-                height: 1920
-            }
-        );
-        assert_eq!(
-            OutputSize::for_source(source(), AspectRatioPreset::Vertical),
-            OutputSize {
-                width: 1080,
-                height: 1920
-            }
-        );
-    }
-
-    #[test]
-    fn viewport_values_do_not_change_export_frame() {
-        let first = ProjectSettings::default();
-        let mut second = first.clone();
-        second.canvas.zoom = 4.0;
-        second.canvas.pan_x = 80.0;
-        second.canvas.pan_y = -40.0;
-        let frame_a = evaluate_with_aspect(
-            &first.canvas_composition,
-            source(),
-            OutputSize::for_source(source(), first.canvas_composition.aspect_ratio),
-            None,
-            None,
-        );
-        let frame_b = evaluate_with_aspect(
-            &second.canvas_composition,
-            source(),
-            OutputSize::for_source(source(), second.canvas_composition.aspect_ratio),
-            None,
-            None,
-        );
-        assert_eq!(frame_a, frame_b);
-    }
-
-    #[test]
-    fn zoom_changes_only_the_recording_transform() {
-        let composition = CanvasComposition::default();
-        let output = OutputSize::for_source(source(), composition.aspect_ratio);
-        let plain = evaluate_with_aspect(&composition, source(), output, None, None);
-        let zoom = evaluate_with_aspect(
-            &composition,
-            source(),
-            output,
-            Some(ZoomEffect {
-                scale: 2.0,
-                target: ZoomTarget::CanvasCenter,
-            }),
-            None,
-        );
-        assert_eq!(plain.base_recording, zoom.base_recording);
-        assert!(zoom.recording.width > plain.recording.width);
-    }
-
-    #[test]
-    fn normalized_settings_evaluate_deterministically() {
-        let settings = ProjectSettings::default().normalized();
-        let frame_a = evaluate(&settings, source(), 123_456, None);
-        let frame_b = evaluate(&settings, source(), 123_456, None);
-        assert_eq!(frame_a, frame_b);
+fn valid_aspect(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 {
+        value
+    } else {
+        DEFAULT_VIDEO_ASPECT
     }
 }
+
+#[cfg(test)]
+#[path = "composition_tests.rs"]
+mod tests;

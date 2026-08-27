@@ -1,4 +1,6 @@
-use super::{CursorEvaluator, CursorEvent, CursorSample, CursorSettings, CursorTrack};
+use super::{
+    CursorEvaluator, CursorEvent, CursorOverlay, CursorSample, CursorSettings, CursorTrack,
+};
 use crate::recorder::input::{ButtonState, MouseEventKind};
 
 fn track() -> CursorTrack {
@@ -138,6 +140,23 @@ fn evaluator_applies_click_bounce_to_cursor_scale() {
         .expect("cursor frame should exist");
 
     assert!(frame.scale < 1.0);
+}
+
+#[test]
+fn timestamp_frame_uses_media_timebase() {
+    let overlay = CursorOverlay {
+        evaluator: CursorEvaluator {
+            track: Some(track()),
+        },
+        status: String::new(),
+        warning: None,
+    };
+    let frame = overlay
+        .frame_at_timestamp(5_000_000, CursorSettings::default())
+        .expect("timestamp should resolve to a cursor frame");
+
+    assert_eq!(frame.x, 0.5);
+    assert_eq!(frame.y, 0.5);
 }
 
 fn track_with_events(events: Vec<CursorEvent>) -> CursorTrack {

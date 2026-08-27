@@ -30,17 +30,23 @@ const BASELINE_FPS: f64 = 60.0;
 const MIN_FPS_SCALE: f32 = 0.25;
 const MAX_FPS_SCALE: f32 = 2.0;
 
-/// Per-effect gains. These let cursor and display blur be tuned separately
-/// without exposing two controls: a whole moving frame reads as heavier motion
-/// than a small sprite, so the display gain is the more conservative one.
-const CURSOR_MULTIPLIER: f32 = 1.0;
-const DISPLAY_MULTIPLIER: f32 = 0.75;
+/// Per-effect gains behind the single authored amount. A whole moving frame
+/// reads as heavier motion than a small sprite, and a radial smear reads
+/// heavier still because it touches every pixel, so each effect is damped
+/// separately rather than exposing three controls.
+const CURSOR_MOTION_MULTIPLIER: f32 = 1.0;
+const DISPLAY_MOVEMENT_MULTIPLIER: f32 = 0.75;
+const DISPLAY_ZOOM_MULTIPLIER: f32 = 0.6;
 
 /// A strength of 1.0 smears across the entire inter-frame distance, which is a
 /// 360° shutter. Film sits near 0.5, so the authored maximum stays expressive
 /// without turning fast motion into a streak.
-const CURSOR_MAX_STRENGTH: f32 = 1.0;
-const DISPLAY_MAX_STRENGTH: f32 = 1.0;
+const MAX_STRENGTH: f32 = 1.0;
+
+/// Largest media-time step still treated as continuous playback. Anything
+/// longer is a jump — a seek that reused the current generation, a stall, a
+/// replay from the end — and its first frame is rendered sharp.
+const MAX_FRAME_GAP_SECONDS: f64 = 0.25;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct Vec2 {
@@ -155,12 +161,27 @@ impl MotionBlurSettings {
     }
 
     pub(crate) fn cursor_strength(self, fps_scale: f32) -> f32 {
-        (self.amount * CURSOR_MULTIPLIER * fps_scale).clamp(0.0, CURSOR_MAX_STRENGTH)
+        self.strength(CURSOR_MOTION_MULTIPLIER, fps_scale)
     }
 
-    pub(crate) fn display_strength(self, fps_scale: f32) -> f32 {
-        (self.amount * DISPLAY_MULTIPLIER * fps_scale).clamp(0.0, DISPLAY_MAX_STRENGTH)
+    pub(crate) fn movement_strength(self, fps_scale: f32) -> f32 {
+        self.strength(DISPLAY_MOVEMENT_MULTIPLIER, fps_scale)
     }
+
+    pub(crate) fn zoom_strength(self, fps_scale: f32) -> f32 {
+        self.strength(DISPLAY_ZOOM_MULTIPLIER, fps_scale)
+    }
+
+    fn strength(self, multiplier: f32, fps_scale: f32) -> f32 {
+        (self.amount * multiplier * fps_scale).clamp(0.0, MAX_STRENGTH)
+    }
+}
+
+/// Elapsed media time between two presented frames, or `None` when the step is
+/// a discontinuity rather than playback: a repeat, a rewind, or a jump.
+pub(crate) fn frame_delta(previous_seconds: f64, current_seconds: f64) -> Option<f64> {
+    let delta = current_seconds - previous_seconds;
+    (delta.is_finite() && delta > 0.0 && delta <= MAX_FRAME_GAP_SECONDS).then_some(delta)
 }
 
 /// Corrects for the preview rate so a smear looks the same at 24, 30, and

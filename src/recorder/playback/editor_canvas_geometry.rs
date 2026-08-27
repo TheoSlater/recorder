@@ -10,6 +10,8 @@ use super::super::{
 
 const DEFAULT_VIDEO_ASPECT: f32 = 16. / 9.;
 const HANDLE_SIZE: f32 = 12.;
+const VIEWPORT_ZOOM_TOLERANCE: f64 = 0.001;
+const VIEWPORT_PAN_TOLERANCE: f64 = 0.5;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct CanvasGeometry {
@@ -70,21 +72,19 @@ pub(super) fn preview_geometry(
         composition_radius,
         resize_handle,
         composition_frame,
-        recording_transform: RecordingTransform::new(
-            Vec2::new(
-                (composition_frame.recording.x + composition_frame.recording.width / 2.0) as f32,
-                (composition_frame.recording.y + composition_frame.recording.height / 2.0) as f32,
-            ),
-            Vec2::new(
-                composition_frame.recording.width as f32,
-                composition_frame.recording.height as f32,
-            ),
-        ),
-        zoom_focus: Vec2::new(
-            composition_frame.zoom_focus.0 as f32,
-            composition_frame.zoom_focus.1 as f32,
-        ),
+        recording_transform: composition_frame.recording_transform(),
+        zoom_focus: composition_frame.zoom_center(),
     }
+}
+
+/// Returns whether the editor camera needs a recenter affordance.
+///
+/// A fitted canvas reaches at least one stage edge, so zooming above 1x clips
+/// it. Panning moves its center even when the whole canvas remains visible.
+pub(super) fn needs_recenter(view: CanvasView) -> bool {
+    view.zoom > 1.0 + VIEWPORT_ZOOM_TOLERANCE
+        || view.pan_x.abs() > VIEWPORT_PAN_TOLERANCE
+        || view.pan_y.abs() > VIEWPORT_PAN_TOLERANCE
 }
 
 /// Places an output-normalized rect onto the on-screen canvas, which is where
@@ -119,14 +119,10 @@ pub(super) fn hit_test(geometry: CanvasGeometry, position: Point<Pixels>) -> Opt
 }
 
 pub(super) fn cover_bounds(bounds: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {
-    let aspect = safe_aspect(aspect);
-    let mut width = bounds.size.width.as_f32();
-    let mut height = width / aspect;
-    if height < bounds.size.height.as_f32() {
-        height = bounds.size.height.as_f32();
-        width = height * aspect;
-    }
-    centered_bounds(bounds.center(), width, height)
+    let container_aspect =
+        f64::from(bounds.size.width.as_f32()) / f64::from(bounds.size.height.as_f32().max(1.0));
+    let rect = composition::cover_rect(container_aspect, f64::from(aspect));
+    normalized_bounds(bounds, rect)
 }
 
 fn fit_canvas(stage: Bounds<Pixels>, aspect: f32) -> Bounds<Pixels> {

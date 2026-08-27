@@ -32,6 +32,8 @@ mod editor_shell;
 mod editor_timeline;
 #[path = "playback/editor_timeline_canvas.rs"]
 mod editor_timeline_canvas;
+#[path = "playback/editor_timeline_thumbnails.rs"]
+mod editor_timeline_thumbnails;
 #[path = "playback/editor_toolbar.rs"]
 mod editor_toolbar;
 #[path = "playback/editor_zoom.rs"]
@@ -40,6 +42,8 @@ mod editor_zoom;
 mod playback_ui;
 #[path = "playback/preview_rate.rs"]
 mod preview_rate;
+#[path = "playback/preview_spike.rs"]
+mod preview_spike;
 mod view;
 
 pub(super) use view::PlaybackView;
@@ -58,6 +62,7 @@ use super::{
     project_settings::ProjectSettings,
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn open(
     cx: &mut AsyncApp,
     video_path: PathBuf,
@@ -81,6 +86,13 @@ pub(super) fn open(
                 ..Default::default()
             }),
             window_min_size: Some(size(px(720.), px(460.))),
+            // The probe needs GPUI's own output to carry alpha, otherwise an
+            // underlying composition surface can never show through.
+            window_background: if preview_spike::enabled() {
+                WindowBackgroundAppearance::Transparent
+            } else {
+                WindowBackgroundAppearance::Opaque
+            },
             ..Default::default()
         }
     });
@@ -123,7 +135,17 @@ pub(super) fn open(
                 }
             }
         });
-        cx.new(|cx| Root::new(view, window, cx))
+        cx.new(|cx| {
+            let mut root = Root::new(view, window, cx);
+            if preview_spike::enabled() {
+                // GPUI's Windows backend never reads `WindowOptions::window_background`,
+                // and gpui-component's Root paints its own opaque fill. Both have to be
+                // cleared for anything composed beneath the window to be visible.
+                window.set_background_appearance(WindowBackgroundAppearance::Transparent);
+                root.style().background = Some(transparent_black().into());
+            }
+            root
+        })
     })?;
 
     if let Some(error) = build_error.borrow_mut().take() {

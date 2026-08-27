@@ -1,4 +1,4 @@
-use gpui::*;
+use gpui::{prelude::FluentBuilder as _, *};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, Size, button::*, h_flex};
 
 use super::PlaybackView;
@@ -59,8 +59,6 @@ pub(super) fn render_toolbar(
         .on_click(cx.listener(|view, _, window, cx| {
             view.choose_background_image(window, cx);
         }));
-    let fit_button = toolbar_button("fit-preview", IconName::Frame, "Reset canvas view")
-        .on_click(cx.listener(|view, _, _, cx| view.reset_canvas_view(cx)));
     let zoom_out_button = toolbar_button("zoom-out", IconName::Minus, "Zoom out canvas")
         .on_click(cx.listener(|view, _, _, cx| view.adjust_canvas_zoom(-0.1, cx)));
     let zoom_in_button = toolbar_button("zoom-in", IconName::Plus, "Zoom in canvas")
@@ -123,7 +121,20 @@ pub(super) fn render_toolbar(
                         .border_1()
                         .border_color(cx.theme().border)
                         .bg(cx.theme().popover)
-                        .child(fit_button)
+                        .when(view.canvas_needs_recenter(), |controls| {
+                            controls.child(
+                                toolbar_button(
+                                    "recenter-canvas",
+                                    IconName::Frame,
+                                    "Recenter canvas",
+                                )
+                                .on_click(cx.listener(
+                                    |view, _, _, cx| {
+                                        view.reset_canvas_view(cx);
+                                    },
+                                )),
+                            )
+                        })
                         .child(zoom_out_button)
                         .child(zoom_in_button),
                 ),
