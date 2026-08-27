@@ -1,25 +1,29 @@
-use std::path::Path;
+//! D3D11 resources the composition renderer needs: shader compilation, the
+//! shared constant buffer, render textures, and colour parsing.
 
-use anyhow::{Context, Result, anyhow};
 use windows::{
     Win32::Graphics::{
         Direct3D::{Fxc::D3DCompile, ID3DBlob, ID3DInclude},
         Direct3D11::{
             D3D11_BIND_CONSTANT_BUFFER, D3D11_BIND_SHADER_RESOURCE, D3D11_BUFFER_DESC,
-            D3D11_CPU_ACCESS_WRITE, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC,
-            D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC, ID3D11ClassLinkage, ID3D11Device,
-            ID3D11PixelShader, ID3D11Texture2D, ID3D11VertexShader,
+            D3D11_CPU_ACCESS_WRITE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_USAGE_DYNAMIC,
+            ID3D11ClassLinkage, ID3D11Device, ID3D11PixelShader, ID3D11Texture2D,
+            ID3D11VertexShader,
         },
-        Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC},
+        Dxgi::Common::DXGI_SAMPLE_DESC,
     },
     core::PCSTR,
 };
 
-use super::super::{composition, composition::NormalizedRect, cursor_settings::CursorStyle};
-use super::{
-    renderer::{Constants, ImageTexture},
-    shaders,
-};
+use super::super::super::RenderError;
+use super::constants::Constants;
+use super::shaders;
+
+type Result<T> = std::result::Result<T, RenderError>;
+
+fn device_error(what: &str, error: impl std::fmt::Display) -> RenderError {
+    RenderError::Device(format!("{what}: {error}"))
+}
 
 pub(super) fn create_output(
     device: &ID3D11Device,
@@ -45,8 +49,8 @@ pub(super) fn create_output(
     };
     let mut texture = None;
     unsafe { device.CreateTexture2D(&description, None, Some(&mut texture)) }
-        .context("could not create export render texture")?;
-    texture.ok_or_else(|| anyhow!("export render texture was null"))
+        .map_err(|error| device_error("could not create a render texture", error))?;
+    texture.ok_or_else(|| RenderError::Device("render texture was null".into()))
 }
 
 pub(crate) fn create_constants(
@@ -62,16 +66,16 @@ pub(crate) fn create_constants(
     };
     let mut buffer = None;
     unsafe { device.CreateBuffer(&description, None, Some(&mut buffer)) }
-        .context("could not create export constants")?;
-    buffer.ok_or_else(|| anyhow!("export constants buffer was null"))
+        .map_err(|error| device_error("could not create the constant buffer", error))?;
+    buffer.ok_or_else(|| RenderError::Device("constant buffer was null".into()))
 }
 
 pub(crate) fn create_vertex_shader(device: &ID3D11Device) -> Result<ID3D11VertexShader> {
     let code = compile(&shaders::vertex(), b"vs_5_0\0")?;
     let mut shader = None;
     unsafe { device.CreateVertexShader(&code, None::<&ID3D11ClassLinkage>, Some(&mut shader)) }
-        .context("could not create export vertex shader")?;
-    shader.ok_or_else(|| anyhow!("export vertex shader was null"))
+        .map_err(|error| device_error("could not create the vertex shader", error))?;
+    shader.ok_or_else(|| RenderError::Device("vertex shader was null".into()))
 }
 
 pub(crate) fn create_pixel_shader(
@@ -81,8 +85,8 @@ pub(crate) fn create_pixel_shader(
     let code = compile(source, b"ps_5_0\0")?;
     let mut shader = None;
     unsafe { device.CreatePixelShader(&code, None::<&ID3D11ClassLinkage>, Some(&mut shader)) }
-        .context("could not create export pixel shader")?;
-    shader.ok_or_else(|| anyhow!("export pixel shader was null"))
+        .map_err(|error| device_error("could not create a pixel shader", error))?;
+    shader.ok_or_else(|| RenderError::Device("pixel shader was null".into()))
 }
 
 fn compile(source: &str, target: &[u8]) -> Result<Vec<u8>> {
@@ -104,12 +108,13 @@ fn compile(source: &str, target: &[u8]) -> Result<Vec<u8>> {
         )
     }
     .map_err(|error| {
-        anyhow!(
-            "could not compile export shader: {error}{}",
+        RenderError::Device(format!(
+            "could not compile a shader: {error}{}",
             blob_text(errors)
-        )
+        ))
     })?;
-    let blob = blob.ok_or_else(|| anyhow!("shader compiler returned no bytecode"))?;
+    let blob =
+        blob.ok_or_else(|| RenderError::Device("shader compiler returned no bytecode".into()))?;
     unsafe {
         Ok(
             std::slice::from_raw_parts(blob.GetBufferPointer().cast(), blob.GetBufferSize())
@@ -133,78 +138,6 @@ fn blob_text(blob: Option<ID3DBlob>) -> String {
         String::new()
     } else {
         format!(": {text}")
-    }
-}
-
-pub(super) fn load_image(device: &ID3D11Device, path: &Path) -> Result<ImageTexture> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("could not read background image {}", path.display()))?;
-    let image = image::load_from_memory(&bytes)
-        .with_context(|| format!("could not decode background image {}", path.display()))?
-        .to_rgba8();
-    let width = image.width();
-    let height = image.height();
-    let data = D3D11_SUBRESOURCE_DATA {
-        pSysMem: image.as_ptr().cast(),
-        SysMemPitch: width.saturating_mul(4),
-        SysMemSlicePitch: 0,
-    };
-    let description = D3D11_TEXTURE2D_DESC {
-        Width: width,
-        Height: height,
-        MipLevels: 1,
-        ArraySize: 1,
-        Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-        SampleDesc: DXGI_SAMPLE_DESC {
-            Count: 1,
-            Quality: 0,
-        },
-        Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-        CPUAccessFlags: 0,
-        MiscFlags: 0,
-    };
-    let mut texture = None;
-    unsafe { device.CreateTexture2D(&description, Some(&data), Some(&mut texture)) }
-        .context("could not upload canvas background")?;
-    let texture = texture.ok_or_else(|| anyhow!("canvas background texture was null"))?;
-    let mut view = None;
-    unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }
-        .context("could not create canvas background view")?;
-    let view = view.ok_or_else(|| anyhow!("canvas background view was null"))?;
-    Ok(ImageTexture {
-        _texture: texture,
-        view,
-        width,
-        height,
-    })
-}
-
-pub(super) fn cover_rect(
-    width: u32,
-    height: u32,
-    image_width: u32,
-    image_height: u32,
-) -> NormalizedRect {
-    composition::cover_rect(
-        f64::from(width) / f64::from(height.max(1)),
-        f64::from(image_width) / f64::from(image_height.max(1)),
-    )
-}
-
-pub(super) fn full_rect() -> NormalizedRect {
-    NormalizedRect {
-        x: 0.0,
-        y: 0.0,
-        width: 1.0,
-        height: 1.0,
-    }
-}
-
-pub(super) fn style_value(style: CursorStyle) -> f32 {
-    match style {
-        CursorStyle::Default => 0.0,
-        CursorStyle::Circle => 1.0,
     }
 }
 

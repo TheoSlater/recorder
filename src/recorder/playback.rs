@@ -14,6 +14,8 @@ mod editor_canvas_cursor;
 mod editor_canvas_cursor_blur;
 #[path = "playback/editor_canvas_geometry.rs"]
 mod editor_canvas_geometry;
+#[path = "playback/editor_canvas_layers.rs"]
+mod editor_canvas_layers;
 #[path = "playback/editor_canvas_paint.rs"]
 mod editor_canvas_paint;
 #[path = "playback/editor_cursor.rs"]
@@ -38,12 +40,12 @@ mod editor_timeline_thumbnails;
 mod editor_toolbar;
 #[path = "playback/editor_zoom.rs"]
 mod editor_zoom;
+#[path = "playback/native_preview.rs"]
+mod native_preview;
 #[path = "playback_ui.rs"]
 mod playback_ui;
 #[path = "playback/preview_rate.rs"]
 mod preview_rate;
-#[path = "playback/preview_spike.rs"]
-mod preview_spike;
 mod view;
 
 pub(super) use view::PlaybackView;
@@ -88,7 +90,7 @@ pub(super) fn open(
             window_min_size: Some(size(px(720.), px(460.))),
             // The probe needs GPUI's own output to carry alpha, otherwise an
             // underlying composition surface can never show through.
-            window_background: if preview_spike::enabled() {
+            window_background: if native_preview::enabled() {
                 WindowBackgroundAppearance::Transparent
             } else {
                 WindowBackgroundAppearance::Opaque
@@ -137,7 +139,7 @@ pub(super) fn open(
         });
         cx.new(|cx| {
             let mut root = Root::new(view, window, cx);
-            if preview_spike::enabled() {
+            if native_preview::enabled() {
                 // GPUI's Windows backend never reads `WindowOptions::window_background`,
                 // and gpui-component's Root paints its own opaque fill. Both have to be
                 // cleared for anything composed beneath the window to be visible.

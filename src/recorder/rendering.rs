@@ -20,12 +20,6 @@
 //! [`CompositionFrame`]: super::composition::CompositionFrame
 //! [`MotionBlurDescriptor`]: super::motion_blur::MotionBlurDescriptor
 
-// This subsystem is the architecture step of the preview migration: the shared
-// types and the platform boundary exist and are tested, but no backend consumes
-// them yet, so the curated surface below has no callers. Both allows go away
-// with the first backend that does.
-#![allow(dead_code, unused_imports)]
-
 mod backend;
 mod error;
 mod frame;
@@ -33,12 +27,12 @@ mod state;
 
 #[cfg(target_os = "windows")]
 pub(crate) use backend::windows::{
-    DirectCompositionSurface as PreviewSurface, probe, window_handle,
+    CompositionRenderer, DirectCompositionSurface as PreviewSurface, create_device, window_handle,
 };
 pub(crate) use backend::{Backend, PreviewRenderer, available_backend};
 pub(crate) use error::RenderError;
 pub(crate) use frame::{FrameId, FrameQueue};
-pub(crate) use state::{CompositionState, PhysicalSize, PreviewBounds};
+pub(crate) use state::{CanvasPlacement, CompositionState, PhysicalSize, PreviewBounds};
 
 #[cfg(test)]
 #[path = "rendering/tests.rs"]

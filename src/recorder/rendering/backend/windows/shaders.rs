@@ -22,12 +22,11 @@ cbuffer Constants : register(b0) {
 struct Input { float4 position : SV_POSITION; float2 uv : TEXCOORD0; float2 local : TEXCOORD1; };
 "#;
 
-/// Sampling helpers for the recording layer. The sampler is clamped, so a tap
-/// that leaves the recording repeats its edge texel instead of wrapping or
-/// reading black.
-const RECORDING: &str = r#"
-Texture2D frame_texture : register(t0);
-SamplerState frame_sampler : register(s0);
+/// Rounded-corner clipping, shared by every layer that can be rounded: the
+/// recording, and — in the editor preview — the canvas background behind it.
+/// `misc.x` is the radius in target pixels and `misc.yz` the target size, so a
+/// radius of zero leaves the quad square and costs one comparison.
+const CORNERS: &str = r#"
 float rounded_distance(float2 local, float2 size, float radius) {
     float2 p = local * size;
     float2 q = abs(p - size * 0.5) - (size * 0.5 - radius);
@@ -36,6 +35,14 @@ float rounded_distance(float2 local, float2 size, float radius) {
 void clip_corners(Input input) {
     if (misc.x > 0.0 && rounded_distance(input.local, float2(destination.z * misc.y, destination.w * misc.z), misc.x) > 0.0) discard;
 }
+"#;
+
+/// Sampling helpers for textured layers. The sampler is clamped, so a tap that
+/// leaves the source repeats its edge texel instead of wrapping or reading
+/// black.
+const RECORDING: &str = r#"
+Texture2D frame_texture : register(t0);
+SamplerState frame_sampler : register(s0);
 float4 tap(float2 uv) { return frame_texture.Sample(frame_sampler, uv); }
 "#;
 
@@ -59,7 +66,7 @@ Output main(uint id : SV_VertexID) {
 
 pub(crate) fn texture() -> String {
     format!(
-        "{CONSTANTS}{RECORDING}{}",
+        "{CONSTANTS}{CORNERS}{RECORDING}{}",
         r#"
 float4 main(Input input) : SV_TARGET {
     clip_corners(input);
@@ -76,7 +83,7 @@ float4 main(Input input) : SV_TARGET {
 /// result is one smear, not a stack of offset copies.
 pub(crate) fn movement_blur() -> String {
     format!(
-        "{CONSTANTS}{RECORDING}{}",
+        "{CONSTANTS}{CORNERS}{RECORDING}{}",
         r#"
 static const int TAPS = 21;
 float4 main(Input input) : SV_TARGET {
@@ -103,7 +110,7 @@ float4 main(Input input) : SV_TARGET {
 /// and zooming out smear along the same radial line in opposite directions.
 pub(crate) fn zoom_blur() -> String {
     format!(
-        "{CONSTANTS}{RECORDING}{}",
+        "{CONSTANTS}{CORNERS}{RECORDING}{}",
         r#"
 static const int TAPS = 13;
 static const float MAX_ZOOM_RAY_UV = 0.10;
@@ -135,14 +142,19 @@ float4 main(Input input) : SV_TARGET {
     )
 }
 
+/// Solid and gradient canvas backgrounds. A solid fill is this shader with
+/// both stops set to the same colour, which keeps one rounded-rectangle path
+/// instead of a second shader that differs only in its interpolation.
 pub(crate) fn gradient() -> String {
     format!(
-        "{CONSTANTS}{}",
+        "{CONSTANTS}{CORNERS}{}",
         r#"
 float gradient_position(float2 local) {
     float radians = (fmod(misc.w, 360.0) - 90.0) * (3.14159265 / 180.0);
     float2 direction = float2(cos(radians), sin(radians));
-    float2 size = misc.yz;
+    // The quad's own pixel size, derived the same way the corner clip derives
+    // it, so one `misc.yz` serves both.
+    float2 size = destination.zw * misc.yz;
     if (size.x > size.y) {
         direction.y *= size.y / size.x;
     } else {
@@ -160,6 +172,7 @@ float gradient_position(float2 local) {
 }
 
 float4 main(Input input) : SV_TARGET {
+    clip_corners(input);
     return lerp(color_start, color_end, gradient_position(input.local));
 }
 "#

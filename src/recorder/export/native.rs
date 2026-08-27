@@ -22,7 +22,7 @@ use super::{
 use super::{
     decoder::{self, Decoder},
     encoder::Encoder,
-    renderer::Renderer,
+    frames::Renderer,
 };
 
 pub(crate) fn run(
@@ -38,7 +38,7 @@ pub(crate) fn run(
             Ok(()) => send_terminal(&events, ExportEvent::Finished(output_path)),
             Err(error) => {
                 remove_temporary(&temporary);
-                send_terminal(&events, ExportEvent::Error(error.to_string()));
+                send_terminal(&events, ExportEvent::Error(format!("{error:#}")));
             }
         },
         Ok(false) => {
@@ -47,7 +47,7 @@ pub(crate) fn run(
         }
         Err(error) => {
             remove_temporary(&temporary);
-            send_terminal(&events, ExportEvent::Error(error.to_string()));
+            send_terminal(&events, ExportEvent::Error(format!("{error:#}")));
         }
     }
 }
@@ -61,14 +61,15 @@ fn run_inner(
     let _media = decoder::initialize_media()?;
     let settings = request.settings.clone().normalized();
     let cursor = CursorOverlay::load(&request.telemetry_path, &request.metadata_path);
-    let mut decoder = Decoder::open(&request.video_path)?;
+    let mut decoder = Decoder::open(&request.video_path).map_err(|e| e.context("decoder open"))?;
     let source = decoder.source;
     let output = OutputSize::for_source(source, settings.canvas_composition.aspect_ratio);
-    let renderer = Renderer::new(
+    let mut renderer = Renderer::new(
         decoder.device_context(),
-        output.width,
-        output.height,
+        output,
+        source,
         &settings.canvas_composition,
+        composition::evaluate(&settings, source, 0, None),
     )?;
     let encoder = Encoder::open(
         temporary,
@@ -98,7 +99,9 @@ fn run_inner(
         }
         let timestamp = decoder.frame_rate.timestamp(index);
         let seconds = timestamp as f64 / 10_000_000.0;
-        let source_frame = decoder.frame_at(timestamp)?;
+        let source_frame = decoder
+            .frame_at(timestamp)
+            .map_err(|e| e.context("frame_at"))?;
         let cursor_frame = cursor_frame(&cursor, &settings, timestamp);
         let composition = composition::evaluate(&settings, source, timestamp / 10, cursor_frame);
         let transform = composition.recording_transform();
@@ -123,19 +126,17 @@ fn run_inner(
         });
 
         let render_started = std::time::Instant::now();
-        let rendered = renderer.render(
-            &source_frame.texture,
-            &composition,
-            source,
-            &settings.canvas_composition,
-            motion,
-        )?;
+        let rendered = renderer
+            .render(&source_frame.texture, composition, motion)
+            .map_err(|e| e.context("render"))?;
         cost.record(motion.mode, render_started.elapsed());
-        encoder.write(
-            &rendered,
-            timestamp,
-            decoder.frame_rate.frame_duration(index),
-        )?;
+        encoder
+            .write(
+                &rendered,
+                timestamp,
+                decoder.frame_rate.frame_duration(index),
+            )
+            .map_err(|e| e.context("encoder write"))?;
         if is_cancelled(cancel) {
             return Ok(false);
         }

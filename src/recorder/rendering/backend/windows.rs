@@ -42,10 +42,15 @@
 //!    the background there is enough.
 //! 3. The editor's own shell and preview backgrounds.
 
-mod device;
-mod pipeline;
+mod background;
+pub(crate) mod composition;
+mod constants;
+pub(crate) mod device;
+mod resources;
+mod shaders;
 mod source;
 mod surface;
-mod texture;
 
-pub(crate) use surface::{DirectCompositionSurface, probe, window_handle};
+pub(crate) use composition::CompositionRenderer;
+pub(crate) use device::create as create_device;
+pub(crate) use surface::{DirectCompositionSurface, window_handle};

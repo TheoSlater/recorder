@@ -4,6 +4,14 @@ use gpui_component::ActiveTheme as _;
 use super::super::zoom;
 use super::{PlaybackView, editor_canvas::Canvas};
 
+/// Inset between the preview pane and the canvas stage.
+///
+/// Named rather than inlined because the native compositor has to cover the
+/// whole pane, not just the stage: it is the only thing painting inside the
+/// preview once GPUI's fills there are suppressed, and an uncovered strip would
+/// be transparent all the way through the window.
+pub(super) const PREVIEW_PADDING: Rems = Rems(0.75);
+
 pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> impl IntoElement {
     let stage = if view.player.is_some() {
         Canvas::new(
@@ -31,6 +39,7 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
             view.frame_timing.clone(),
             view.frame_invalidated_at,
             view.playing,
+            view.native_preview.composing(),
         )
         .size_full()
         .cursor(view.canvas_cursor_style())
@@ -110,11 +119,11 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         .self_stretch()
         .min_w(px(0.))
         .min_h(px(0.))
-        .bg(super::preview_spike::background(cx.theme().background))
+        .bg(view.native_preview.background(cx.theme().background))
         .child(
             div()
                 .size_full()
-                .p_3()
+                .p(PREVIEW_PADDING)
                 .child(div().relative().size_full().child(stage).child(fps_badge)),
         )
 }

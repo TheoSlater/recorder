@@ -13,26 +13,27 @@
 //! sampling it.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-
-use crossbeam_channel::{Receiver, Sender, bounded};
+use std::sync::{Arc, Mutex};
 
 use windows::Win32::Graphics::{
     Direct3D11::{
-        D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, ID3D11Device,
-        ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
+        D3D11_BIND_SHADER_RESOURCE, D3D11_BOX, D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT,
+        ID3D11Device, ID3D11DeviceContext, ID3D11ShaderResourceView, ID3D11Texture2D,
     },
     Dxgi::Common::DXGI_SAMPLE_DESC,
 };
 
-use super::super::super::super::export::decoder::{self, DeviceContext};
-use super::super::super::{PhysicalSize, RenderError};
+use crate::recorder::export::decoder::{self, DeviceContext};
+
+use super::super::super::{FrameId, FrameQueue, PhysicalSize, RenderError};
+
+/// The single-slot hand-off from the decode thread to the compositor.
+type Frames = Arc<Mutex<FrameQueue<Crossing>>>;
 
 /// A decoded frame living on the compositor's device.
 pub(super) struct DecodedTexture {
     pub(super) view: ID3D11ShaderResourceView,
-    pub(super) size: PhysicalSize,
     pub(super) timestamp_100ns: u64,
     _texture: ID3D11Texture2D,
 }
@@ -54,16 +55,26 @@ unsafe impl Send for Crossing {}
 /// past. Only one decoded frame is ever in flight, so a slow decode drops work
 /// instead of queueing pictures nobody will see.
 pub(super) struct PreviewSource {
-    frames: Receiver<Crossing>,
+    frames: Frames,
     request: Arc<Request>,
     shutdown: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
-#[derive(Default)]
 struct Request {
     timestamp_100ns: AtomicU64,
     generation: AtomicU64,
+}
+
+impl Default for Request {
+    fn default() -> Self {
+        Self {
+            // No real timestamp, so the first request always differs and the
+            // first frame is decoded rather than treated as already served.
+            timestamp_100ns: AtomicU64::new(u64::MAX),
+            generation: AtomicU64::new(0),
+        }
+    }
 }
 
 impl PreviewSource {
@@ -77,9 +88,10 @@ impl PreviewSource {
         let request = Arc::new(Request::default());
         let shutdown = Arc::new(AtomicBool::new(false));
         // One slot: the renderer only ever draws the newest frame.
-        let (sender, frames) = bounded(1);
+        let frames: Frames = Arc::new(Mutex::new(FrameQueue::new()));
         let worker_request = request.clone();
         let worker_shutdown = shutdown.clone();
+        let worker_frames = frames.clone();
 
         let worker = std::thread::Builder::new()
             .name("recorder-preview-decode".to_string())
@@ -90,7 +102,7 @@ impl PreviewSource {
                     &path,
                     &worker_request,
                     &worker_shutdown,
-                    &sender,
+                    &worker_frames,
                 ) {
                     tracing::error!(target: "recorder::rendering", %error, "preview decode stopped");
                 }
@@ -107,16 +119,34 @@ impl PreviewSource {
 
     /// Asks for the frame current at `timestamp_100ns`. Replaces any request
     /// the worker has not started yet.
+    ///
+    /// A repeated timestamp is not a new request. The editor asks on every
+    /// painted frame, so without this a paused preview would decode the same
+    /// picture continuously.
     pub(super) fn seek(&self, timestamp_100ns: u64) {
-        self.request
+        if self
+            .request
             .timestamp_100ns
-            .store(timestamp_100ns, Ordering::Release);
-        self.request.generation.fetch_add(1, Ordering::AcqRel);
+            .swap(timestamp_100ns, Ordering::AcqRel)
+            != timestamp_100ns
+        {
+            self.request.generation.fetch_add(1, Ordering::AcqRel);
+        }
     }
 
     /// Takes the newest decoded frame, if one arrived since the last call.
     pub(super) fn take(&self) -> Option<DecodedTexture> {
-        self.frames.try_recv().ok().map(|crossing| crossing.0)
+        let mut frames = self.frames.lock().ok()?;
+        frames.take().map(|(_, crossing)| crossing.0)
+    }
+
+    /// Frames decoded but never shown, because a newer one replaced them or the
+    /// playhead moved past them first.
+    pub(super) fn dropped(&self) -> u64 {
+        self.frames
+            .lock()
+            .map(|frames| frames.dropped())
+            .unwrap_or(0)
     }
 }
 
@@ -135,15 +165,19 @@ fn decode_loop(
     path: &std::path::Path,
     request: &Request,
     shutdown: &AtomicBool,
-    frames: &Sender<Crossing>,
+    frames: &Frames,
 ) -> Result<(), String> {
     let _media = decoder::initialize_media().map_err(|error| error.to_string())?;
     let device_context =
         DeviceContext::adopt(device.clone(), context.clone()).map_err(|error| error.to_string())?;
     let mut source =
         decoder::Decoder::open_on(path, device_context).map_err(|error| error.to_string())?;
+    // The media frame size, which a hardware decoder may hand back inside a
+    // larger, alignment-padded texture.
+    let media = PhysicalSize::new(source.source.width, source.source.height);
 
     let mut served = u64::MAX;
+    let mut sequence = 0;
     while !shutdown.load(Ordering::Acquire) {
         let generation = request.generation.load(Ordering::Acquire);
         if generation == served {
@@ -152,6 +186,7 @@ fn decode_loop(
         }
         let timestamp = request.timestamp_100ns.load(Ordering::Acquire);
         served = generation;
+        sequence += 1;
 
         let frame = match source.frame_at(timestamp) {
             Ok(frame) => frame,
@@ -160,7 +195,13 @@ fn decode_loop(
                 continue;
             }
         };
-        let decoded = match copy_frame(device, context, &frame.texture, frame.timestamp_100ns) {
+        let decoded = match copy_frame(
+            device,
+            context,
+            &frame.texture,
+            media,
+            frame.timestamp_100ns,
+        ) {
             Ok(decoded) => decoded,
             Err(error) => {
                 tracing::warn!(target: "recorder::rendering", %error, "preview copy failed");
@@ -168,57 +209,37 @@ fn decode_loop(
             }
         };
         // Drop whatever the renderer has not taken: newest frame wins.
-        let _ = frames.try_send(Crossing(decoded));
+        let id = FrameId::new(generation, sequence, decoded.timestamp_100ns / 10);
+        if let Ok(mut frames) = frames.lock() {
+            frames.offer(id, Crossing(decoded));
+        }
     }
     Ok(())
 }
 
-/// Decodes the frame current at `timestamp_100ns` on a worker thread.
+/// Copies a decoded frame into a texture this module owns, cropped to the media
+/// frame size.
 ///
-/// One frame, synchronously awaited. Used for the first picture, before the
-/// streaming source takes over.
-pub(super) fn decode_frame(
-    device: &ID3D11Device,
-    context: &ID3D11DeviceContext,
-    path: PathBuf,
-    timestamp_100ns: u64,
-) -> Result<DecodedTexture, RenderError> {
-    let device = device.clone();
-    let context = context.clone();
-    let worker = std::thread::Builder::new()
-        .name("recorder-preview-decode".to_string())
-        .spawn(move || -> Result<Crossing, String> {
-            let _media = decoder::initialize_media().map_err(|error| error.to_string())?;
-            let device_context = DeviceContext::adopt(device.clone(), context.clone())
-                .map_err(|error| error.to_string())?;
-            let mut source = decoder::Decoder::open_on(&path, device_context)
-                .map_err(|error| error.to_string())?;
-            let frame = source
-                .frame_at(timestamp_100ns)
-                .map_err(|error| error.to_string())?;
-            copy_frame(&device, &context, &frame.texture, frame.timestamp_100ns)
-                .map(Crossing)
-                .map_err(|error| error.to_string())
-        })
-        .map_err(|error| RenderError::Frame(format!("could not start the decoder: {error}")))?;
-
-    match worker.join() {
-        Ok(Ok(crossing)) => Ok(crossing.0),
-        Ok(Err(error)) => Err(RenderError::Frame(error)),
-        Err(_) => Err(RenderError::Frame("the decoder thread panicked".into())),
-    }
-}
-
-/// Copies a decoded frame into a texture this module owns.
+/// A hardware decoder may return the picture inside a larger texture padded for
+/// alignment. Sampling that texture across its whole extent would letterbox
+/// garbage into the recording layer, so the copy takes exactly the media
+/// rectangle and the renderer can keep sampling the full 0..1 range.
 fn copy_frame(
     device: &ID3D11Device,
     context: &ID3D11DeviceContext,
     source: &ID3D11Texture2D,
+    media: PhysicalSize,
     timestamp_100ns: u64,
 ) -> Result<DecodedTexture, RenderError> {
     let mut description = D3D11_TEXTURE2D_DESC::default();
     unsafe { source.GetDesc(&mut description) };
+    let size = PhysicalSize::new(
+        media.width.min(description.Width).max(1),
+        media.height.min(description.Height).max(1),
+    );
     let owned = D3D11_TEXTURE2D_DESC {
+        Width: size.width,
+        Height: size.height,
         MipLevels: 1,
         ArraySize: 1,
         SampleDesc: DXGI_SAMPLE_DESC {
@@ -236,7 +257,15 @@ fn copy_frame(
         RenderError::Frame(format!("could not create a frame texture: {error}"))
     })?;
     let texture = texture.ok_or_else(|| RenderError::Frame("frame texture was null".into()))?;
-    unsafe { context.CopyResource(&texture, source) };
+    let region = D3D11_BOX {
+        left: 0,
+        top: 0,
+        front: 0,
+        right: size.width,
+        bottom: size.height,
+        back: 1,
+    };
+    unsafe { context.CopySubresourceRegion(&texture, 0, 0, 0, 0, source, 0, Some(&region)) };
 
     let mut view = None;
     unsafe { device.CreateShaderResourceView(&texture, None, Some(&mut view)) }
@@ -245,7 +274,6 @@ fn copy_frame(
 
     Ok(DecodedTexture {
         view,
-        size: PhysicalSize::new(description.Width, description.Height),
         timestamp_100ns,
         _texture: texture,
     })

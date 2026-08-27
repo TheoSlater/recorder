@@ -1,4 +1,4 @@
-//! The GPU device shared by the decoder and the compositor.
+//! The GPU device Media Foundation and the compositor share.
 //!
 //! Media Foundation decodes into textures owned by whichever device it was
 //! given. If the compositor used a different device, every frame would need a
@@ -6,11 +6,14 @@
 //! trip this migration exists to remove. One device for both ends means a
 //! decoded texture is sampled where it already lives.
 //!
-//! Decoding runs on its own thread because GPUI's thread is an STA: its Windows
-//! platform calls `OleInitialize`, so `CoInitializeEx(COINIT_MULTITHREADED)`
-//! there fails. The device is therefore created multithread-protected, which is
-//! what makes it legal for the decoder thread to produce textures the render
-//! thread samples.
+//! Multithread protection is not optional. The source reader and the sink
+//! writer drive this device from their own worker threads, and without it
+//! `IMFDXGIDeviceManager::LockDevice` can block indefinitely — a `ReadSample`
+//! that never returns while consuming no CPU. The preview needs it for a second
+//! reason: decoding runs on its own thread because GPUI's thread is an STA (its
+//! Windows platform calls `OleInitialize`, so `CoInitializeEx(COINIT_MULTITHREADED)`
+//! fails there), and multithread protection is what makes it legal for that
+//! thread to produce textures the render thread samples.
 
 use windows::Win32::Graphics::{
     Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP},
@@ -28,7 +31,7 @@ use super::super::super::RenderError;
 /// `BGRA_SUPPORT` is required by DirectComposition, `VIDEO_SUPPORT` by the
 /// hardware decoder, and the WARP fallback keeps the preview working on a
 /// machine whose hardware device cannot be created.
-pub(super) fn create() -> Result<(ID3D11Device, ID3D11DeviceContext), RenderError> {
+pub(crate) fn create() -> Result<(ID3D11Device, ID3D11DeviceContext), RenderError> {
     let flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
     let mut device = None;
     let mut context = None;

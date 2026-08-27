@@ -452,6 +452,127 @@ Native Windows screen recorder built with GPUI, gpui-component, and
   to be called), `gpui_component::Root`'s themed fill, and the editor's own
   shell and preview backgrounds.
 
+### Native preview composition
+
+- The Windows compositor now draws the *whole* preview composition - editor
+  workspace fill, canvas background, aspect-correct recording with its
+  transform and rounded corners, display motion blur, and the reconstructed
+  cursor - and the GPUI painting of those same layers is suppressed behind
+  `RECORDER_PREVIEW_SPIKE=1`. The migration had to land as one step: GPUI holds
+  the topmost DirectComposition target and paints over the native surface, so
+  suppressing only part of its painting leaves an opaque fill hiding everything
+  underneath. **If the native preview looks blank while render and present
+  succeed, suspect that layering before the decoder, shader, or swapchain.**
+- The exporter's draw loop moved into the compositor rather than being copied.
+  `rendering::backend::windows` now owns the shaders, the D3D11 resources, the
+  constant-buffer layout, and the one composition draw; `export::frames` is a
+  thin wrapper that supplies an output texture per encoded sample. Preview and
+  export therefore cannot drift: they run the same code over the same
+  `CompositionState`.
+- `CanvasPlacement` is the single conversion between canvas-normalized
+  composition values and the render target. Export places the canvas over the
+  whole target; the editor places it inside the preview rectangle. This is the
+  only path by which the editor camera reaches the renderer, and it reaches it
+  as layout - viewport zoom and pan move and scale *where* the canvas appears
+  and never what it contains, which the geometry tests assert directly.
+- Aspect correctness comes from that placement plus two fixes. The recording
+  rect was already fitted to the source aspect by `composition::evaluate`; it
+  was being stretched because it was drawn across a preview-shaped target
+  rather than the canvas. Separately, a hardware decoder may return the picture
+  inside a larger alignment-padded texture, so the frame copy now crops to the
+  media rectangle with `CopySubresourceRegion` instead of copying the whole
+  resource.
+- The canvas owns a real scissor rectangle. A zoom can scale the recording past
+  the canvas, and the render-target edges only coincide with the canvas during
+  export, so relying on them would let the recording spill across the editor
+  workspace. Background images cover through source UVs rather than an oversized
+  quad for the same reason.
+- Rounded-corner clipping moved into a shader fragment shared by the recording
+  and the canvas background, so the editor's rounded canvas is drawn by the same
+  path as the rounded recording layer. Export passes a zero radius and is
+  unchanged. A solid background is the gradient shader with both stops equal,
+  which avoids a second shader that differs only in its interpolation.
+- Zoom and display motion blur needed no renderer work: the preview evaluates
+  the shared composition module at the playhead exactly as export does, so
+  manual and automatic zoom regions, cursor- and centre-targeted focus, easing,
+  and the movement/radial blur classification all arrive in `CompositionState`
+  already resolved.
+- GPUI keeps the editor chrome that sits over the composition - the export
+  boundary guide, the selection outline, and the resize handle - because those
+  are interaction affordances rather than composition. The layers the compositor
+  took over live in `editor_canvas_layers`, one module to delete when the legacy
+  preview retires.
+- `PreviewSource` now hands frames over through the `FrameQueue` written for
+  that job instead of a second single-slot channel, and a repeated timestamp is
+  no longer a new request, so a paused preview stops re-decoding the same
+  picture continuously. The queue's dropped count is reported as a real metric.
+- Backend selection is one function. `rendering::available_backend` reads
+  `RECORDER_PREVIEW_SPIKE` and reports `Native` only on Windows; everything
+  else - window transparency, the editor's suppressed painting, the surround
+  colour - follows from it. Whether the native surface is actually composing is
+  per editor window rather than a global, so a second window that fails to
+  create a surface keeps its own working legacy preview.
+
+#### Measured on hardware
+
+- A 3440x1440 60 FPS recording, native preview, RTX 4060, 1032x476 preview
+  rectangle at scale factor 1.0: **60.0 presented frames per second, sustained
+  and flat across 20 seconds** (301/301/300/301 per five-second window), one
+  dropped decode at startup and none after, and **0.39-0.48 ms of CPU per
+  composed and presented frame**. No frame, decode, or present errors.
+- Present is unsynchronised and the draw only queues GPU work, so that frame
+  time is the compositor's CPU share of the editor's budget, not GPU time. GPU
+  time was not measured.
+- Presented frames are paced by GPUI's render pass, because composition happens
+  there. The legacy decoder still runs alongside the native one while it remains
+  the fallback, so this figure is the native path keeping up with the editor,
+  not the two paths compared. A like-for-like comparison needs the legacy decode
+  retired.
+- One measurement run showed 4 FPS and did not reproduce across four subsequent
+  runs of the same binary; it followed a fresh link and is most likely machine
+  contention. Worth re-checking rather than trusted away.
+- CPU and GPU utilisation for the process as a whole were not measured; no
+  repeatable Windows counter harness exists yet.
+
+#### Export
+
+- Export shares the composition renderer, so it needed re-running. Doing so
+  found a real pre-existing deadlock: `export::decoder::create_device` never
+  marked its D3D11 device multithread-protected, while the preview's device
+  always has. Media Foundation's source reader drives that device from its own
+  worker threads, and without the protection `ReadSample` blocked forever -
+  observed as an export consuming one second of CPU in twenty minutes. Both
+  ends now use the renderer's single device recipe, which documents why.
+- Past that, export reaches and completes decode and composition for the first
+  frame and then fails in `Encoder::write` with `E_INVALIDARG`. That is
+  unchanged Sink Writer code newly reachable now the deadlock is gone, so
+  export has evidently never completed on this machine. **Export is therefore
+  not verified**, and this is the first thing to chase.
+- `src/recorder/export/export_tests.rs` runs a real export end to end. It is
+  `#[ignore]`d because it needs a GPU, Media Foundation, and a recording under
+  `recordings/`, and it is bounded so a stalled Media Foundation call reports
+  where it stopped instead of hanging the suite. Export errors now carry their
+  stage (`encoder write: ...`) rather than a bare HRESULT.
+
+#### Not yet verified
+
+- Nobody has *looked* at the composed preview. Attachment, streaming, render,
+  and present were confirmed from logs and counters on real hardware; the
+  picture itself - colours, cursor placement, corner radii, blur - has not been
+  visually confirmed.
+- Resize, maximise/restore, minimise/restore, DPI changes, and moving between
+  monitors all reach `set_bounds`, which rebuilds the swapchain only when the
+  size differs, but none of that matrix has been exercised.
+- Seeking and scrubbing were not driven through the UI. The native source keeps
+  latest-request-wins with a single in-flight decode; the editor's own seek
+  generations and bounded queues are untouched.
+- Cursor motion blur is still the GPUI sprite path and does not reach the native
+  compositor. Wiring the existing `CursorMotion` descriptor into the cursor
+  shader is the remaining effect.
+- The composition drop shadow is not drawn natively, matching export, which does
+  not draw it either.
+
+
 ## Next
 
 - Verify RGB32 orientation/channel order and thumbnail quality on real Windows
@@ -464,30 +585,30 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 - If runtime testing exposes color-conversion or source-reader compatibility
   gaps, add a small fixture-backed thumbnail decoder test or enable only the
   required Media Foundation video-processing path without changing playback.
-- Track the preview rectangle across resize, DPI change, monitor moves, and
-  minimise/restore, so the surface follows the rectangle GPUI assigns instead of
-  the one it was created with.
-- Turn the single decoded frame into streaming playback: keep the existing
-  bounded worker, seek generations, and stale-frame rejection, and route frames
-  through `FrameQueue` to the surface. The preview's NV12 to BGRA conversion and
-  its `RenderImage` uploads retire with it.
-- Fold the exporter's draw loop into the preview pipeline once the preview
-  composes a real frame, so one compositor serves both targets.
-- Remove the probe module and its three background overrides once the backend
-  owns the surface.
-- Reuse `export::decoder`'s GPU path for preview once the surface exists: it
-  already configures `MF_SOURCE_READER_D3D_MANAGER` with hardware transforms and
-  reads `ID3D11Texture2D` from `IMFDXGIBuffer`, so the preview's CPU NV12 to
-  BGRA conversion can be retired without new decoder work.
-- Measure presented FPS, CPU, and GPU for the native path against the current
-  `RenderImage` path at 1920x1080, 2560x1440, and 3440x1440.
-- Carry display motion blur into the editor preview. The descriptor is already
-  computed and reset per presented frame there, but GPUI's scene has a closed
-  set of primitives and no custom-shader entry point, so the directional and
-  radial filters have nowhere to run in the preview. This wants the same
-  upstream Windows GPUI primitive work as external textures; do not approximate
-  it with repeated `paint_image` calls, which is the duplicate-sprite artifact
-  the effect exists to avoid.
+- Fix the export `E_INVALIDARG` in `Encoder::write`. Decode and composition now
+  succeed and the sink writer rejects the first sample; suspect the ARGB32 input
+  media type reaching the hardware H.264 MFT through a DXGI surface buffer.
+  `cargo test --release -- --ignored exports_a_recording` reproduces it.
+- Look at the native preview and confirm the composed picture: background
+  colours and gradients, recording aspect and corner radius, cursor position and
+  size, zoom framing, and the movement and radial blurs. Presented frames are
+  confirmed; the picture is not.
+- Exercise the surface lifecycle matrix on the native path - window resize,
+  maximise/restore, minimise/restore, DPI change, moving between monitors, and
+  inspector layout changes - watching for stale rectangles, stretching, flicker,
+  black frames, and leaked surfaces.
+- Drive seeking and scrubbing through the native preview: timeline click seeks,
+  aggressive drags, jump to start and end, and replay from end of media, keeping
+  latest-request-wins and bounded queues intact.
+- Wire cursor motion blur into the native cursor shader from the existing
+  `CursorMotion` descriptor, as a directional smear over the procedural sprite,
+  rather than uploading a CPU-built sprite the native path exists to avoid.
+- Retire the legacy `RenderImage` decode once the native path is validated, then
+  measure presented FPS, CPU, and GPU for both paths at 1920x1080, 2560x1440,
+  and 3440x1440. Until the legacy decode stops running alongside the native one,
+  the two cannot be compared like for like.
+- Draw the composition drop shadow natively, which needs the same GPU shadow
+  pass export still lacks.
 - Tune the motion-blur constants against exported recordings: the three
   multipliers, the movement/zoom dead zones, `MODE_DOMINANCE`, `MAX_MOVEMENT_UV`,
   `MAX_ZOOM_AMOUNT`, the shader's `MAX_ZOOM_RAY_UV`, and the 480 px cursor clamp.
@@ -545,6 +666,7 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 
 ## Later
 - Add macos and linux recording support.
+- Add macos and linux preview support
 - Let users rename projects (updates `<folder>.recproj` naming and home list
   labels) when the project workflow expands beyond the current dedicated
   playback window.

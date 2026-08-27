@@ -1,6 +1,8 @@
-use super::{Backend, CompositionState, FrameId, FrameQueue, PhysicalSize, PreviewBounds};
+use super::{
+    Backend, CanvasPlacement, CompositionState, FrameId, FrameQueue, PhysicalSize, PreviewBounds,
+};
 use crate::recorder::{
-    composition::{self, SourceSize},
+    composition::{self, NormalizedRect, SourceSize},
     motion_blur::MotionBlurDescriptor,
     project_settings::ProjectSettings,
 };
@@ -76,10 +78,9 @@ fn rejects_collapsed_preview_rectangles() {
 }
 
 #[test]
-fn selects_the_legacy_preview_until_a_backend_exists() {
-    // No platform has a working native backend yet, so selection must keep the
-    // editor on the preview that draws rather than a blank rectangle.
-    assert_eq!(super::available_backend(), Backend::LegacyGpui);
+fn defaults_to_the_legacy_preview() {
+    // The native compositor is opt-in until it has been validated on hardware,
+    // so an editor that asks for nothing keeps the preview that draws.
     assert_eq!(Backend::default(), Backend::LegacyGpui);
 }
 
@@ -102,22 +103,12 @@ fn presents_the_newest_frame_of_a_generation() {
 #[test]
 fn rejects_frames_from_a_replaced_seek() {
     let mut queue = FrameQueue::new();
-    queue.set_generation(4);
-
-    assert!(!queue.offer(FrameId::new(3, 9, 9_000), "stale"));
-    assert!(queue.take().is_none());
     assert!(queue.offer(FrameId::new(4, 1, 1_000), "current"));
+
+    // A decode that finishes after the user has already seeked past it must not
+    // pull the preview backwards.
+    assert!(!queue.offer(FrameId::new(3, 9, 9_000), "stale"));
     assert_eq!(queue.take().map(|(_, frame)| frame), Some("current"));
-}
-
-#[test]
-fn drops_pending_frames_when_a_seek_supersedes_them() {
-    let mut queue = FrameQueue::new();
-    queue.offer(FrameId::new(0, 1, 1_000), "before");
-    queue.set_generation(1);
-
-    assert!(queue.take().is_none());
-    assert_eq!(queue.dropped(), 1);
 }
 
 #[test]
@@ -133,8 +124,10 @@ fn ignores_out_of_order_decodes() {
 fn composition_state_carries_the_shared_frame() {
     let settings = ProjectSettings::default();
     let frame = composition::evaluate(&settings, source(), 0, None);
+    let size = PhysicalSize::new(1920, 1080);
     let state = CompositionState::new(
-        PhysicalSize::new(1920, 1080),
+        size,
+        CanvasPlacement::filling(size),
         source(),
         frame,
         settings.canvas_composition.background.clone(),
@@ -143,7 +136,85 @@ fn composition_state_carries_the_shared_frame() {
 
     assert!(!state.is_empty());
     assert_eq!(state.frame, frame);
-    assert!((state.output_size.aspect() - 16.0 / 9.0).abs() < 1e-4);
+    assert!((state.target_size.aspect() - 16.0 / 9.0).abs() < 1e-4);
+}
+
+/// Export draws into a target that *is* the canvas, which is what keeps its
+/// pixels free of anything the editor's placement carries.
+#[test]
+fn a_filling_canvas_leaves_composition_rects_untouched() {
+    let placement = CanvasPlacement::filling(PhysicalSize::new(1920, 1080));
+    let recording = NormalizedRect {
+        x: 0.1,
+        y: 0.2,
+        width: 0.5,
+        height: 0.25,
+    };
+
+    assert_eq!(placement.place(recording), recording);
+    assert_eq!(placement.corner_radius, 0.0);
+}
+
+#[test]
+fn places_canvas_rects_inside_the_preview_surface() {
+    // A canvas occupying the middle half of the surface: everything drawn on it
+    // has to land inside that half, at half the size.
+    let placement = CanvasPlacement {
+        rect: NormalizedRect {
+            x: 0.25,
+            y: 0.25,
+            width: 0.5,
+            height: 0.5,
+        },
+        size: PhysicalSize::new(960, 540),
+        corner_radius: 20.0,
+        surround: [0.0, 0.0, 0.0, 1.0],
+    };
+
+    let whole_canvas = placement.place(NormalizedRect {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    });
+    assert_eq!(whole_canvas, placement.rect);
+
+    let centered = placement.place(NormalizedRect {
+        x: 0.5,
+        y: 0.5,
+        width: 0.25,
+        height: 0.25,
+    });
+    assert!((centered.x - 0.5).abs() < 1e-9, "{centered:?}");
+    assert!((centered.y - 0.5).abs() < 1e-9, "{centered:?}");
+    assert!((centered.width - 0.125).abs() < 1e-9, "{centered:?}");
+}
+
+/// A zoom can push the recording past the canvas. The placement must map it
+/// faithfully — clipping is the renderer's scissor, not this conversion's job.
+#[test]
+fn maps_layers_that_overflow_the_canvas() {
+    let placement = CanvasPlacement {
+        rect: NormalizedRect {
+            x: 0.2,
+            y: 0.1,
+            width: 0.6,
+            height: 0.8,
+        },
+        size: PhysicalSize::new(600, 800),
+        corner_radius: 0.0,
+        surround: [0.0; 4],
+    };
+
+    let overflowing = placement.place(NormalizedRect {
+        x: -0.5,
+        y: -0.5,
+        width: 2.0,
+        height: 2.0,
+    });
+
+    assert!(overflowing.x < placement.rect.x);
+    assert!(overflowing.width > placement.rect.width);
 }
 
 #[test]

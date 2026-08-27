@@ -49,12 +49,22 @@ pub(crate) enum Backend {
     Native,
 }
 
-/// The best backend compiled in for this platform.
+/// Opt-in for the native compositor while it is brought up.
+const NATIVE_PREVIEW_VARIABLE: &str = "RECORDER_PREVIEW_SPIKE";
+
+/// The backend the editor should use.
 ///
-/// Every platform still reports the legacy path. The Windows backend's surface
-/// integration is not implemented yet, and macOS and Linux are module
-/// boundaries only, so claiming a native backend here would make the editor
-/// select a preview that cannot draw. This flips per platform as backends land.
+/// Windows can compose natively, but the legacy GPUI preview stays the default
+/// until the native path has been validated through zoom, seeking, resizing,
+/// performance, and motion blur on real hardware. Until then this is the single
+/// switch between them: a platform with no backend, or a machine where device
+/// creation fails, keeps a preview that draws rather than a blank rectangle.
 pub(crate) fn available_backend() -> Backend {
-    Backend::LegacyGpui
+    if cfg!(target_os = "windows")
+        && std::env::var(NATIVE_PREVIEW_VARIABLE).is_ok_and(|value| value == "1")
+    {
+        Backend::Native
+    } else {
+        Backend::LegacyGpui
+    }
 }

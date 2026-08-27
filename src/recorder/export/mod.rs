@@ -1,10 +1,8 @@
 pub(crate) mod decoder;
 mod encoder;
+mod frames;
 mod native;
 mod path;
-pub(crate) mod renderer;
-pub(crate) mod resources;
-pub(crate) mod shaders;
 
 use std::{
     path::{Path, PathBuf},
@@ -163,20 +161,5 @@ fn is_cancelled(cancel: &AtomicBool) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::mp4_path;
-    use std::path::PathBuf;
-
-    #[test]
-    fn normalizes_extension_for_mp4_exports() {
-        assert_eq!(
-            mp4_path(PathBuf::from("movie")).unwrap(),
-            PathBuf::from("movie.mp4")
-        );
-        assert_eq!(
-            mp4_path(PathBuf::from("movie.MP4")).unwrap(),
-            PathBuf::from("movie.MP4")
-        );
-        assert!(mp4_path(PathBuf::from("movie.mov")).is_err());
-    }
-}
+#[path = "export_tests.rs"]
+mod tests;

@@ -34,6 +34,9 @@ impl FrameId {
 #[derive(Debug, Default)]
 pub(crate) struct FrameQueue<T> {
     pending: Option<(FrameId, T)>,
+    /// The newest generation a frame has been accepted for. A decode that
+    /// finishes after the user has moved on belongs to a request that no longer
+    /// exists, so it is dropped rather than shown.
     generation: u64,
     dropped: u64,
 }
@@ -47,18 +50,6 @@ impl<T> FrameQueue<T> {
         }
     }
 
-    /// Invalidates everything decoded for an earlier seek. The caller raises the
-    /// generation when it publishes a new seek, exactly as the playback view
-    /// does today.
-    pub(crate) fn set_generation(&mut self, generation: u64) {
-        if generation != self.generation {
-            self.generation = generation;
-            if self.pending.take().is_some() {
-                self.dropped += 1;
-            }
-        }
-    }
-
     /// Offers a decoded frame. Returns false when the frame was rejected as
     /// stale, either because its seek generation is obsolete or because a newer
     /// frame from the same generation is already waiting.
@@ -67,6 +58,7 @@ impl<T> FrameQueue<T> {
             self.dropped += 1;
             return false;
         }
+        self.generation = id.generation;
         if let Some((pending, _)) = self.pending.as_ref()
             && pending.generation == id.generation
             && pending.sequence > id.sequence

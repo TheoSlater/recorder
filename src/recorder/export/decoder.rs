@@ -3,15 +3,7 @@ use std::{os::windows::ffi::OsStrExt, path::Path};
 use anyhow::{Context, Result, anyhow, bail};
 use windows::{
     Win32::{
-        Foundation::HMODULE,
-        Graphics::{
-            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_WARP},
-            Direct3D11::{
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
-                D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-                ID3D11Texture2D,
-            },
-        },
+        Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D},
         Media::MediaFoundation::{
             IMFAttributes, IMFDXGIBuffer, IMFDXGIDeviceManager, IMFMediaType, IMFSample,
             IMFSourceReader, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE, MF_MT_MAJOR_TYPE, MF_MT_SUBTYPE,
@@ -241,44 +233,14 @@ impl Decoder {
     }
 }
 
+/// Creates a device for a decoder that owns one.
+///
+/// The recipe belongs to the renderer, which needs the same device for the
+/// compositor and documents why it must be multithread-protected: Media
+/// Foundation drives it from its own worker threads, and without that
+/// protection `ReadSample` can block forever.
 fn create_device() -> Result<DeviceContext> {
-    let flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    let mut device = None;
-    let mut context = None;
-    let result = unsafe {
-        D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
-            HMODULE::default(),
-            flags,
-            None,
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
-    };
-    if result.is_err() {
-        device = None;
-        context = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_WARP,
-                HMODULE::default(),
-                flags,
-                None,
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                Some(&mut context),
-            )?;
-        }
-    } else {
-        result?;
-    }
-    let device = device.ok_or_else(|| anyhow!("D3D11 device creation returned null"))?;
-    let context = context.ok_or_else(|| anyhow!("D3D11 context creation returned null"))?;
+    let (device, context) = super::super::rendering::create_device()?;
     DeviceContext::adopt(device, context)
 }
 

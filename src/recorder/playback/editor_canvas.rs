@@ -35,6 +35,9 @@ pub(super) struct Canvas {
     frame_timing: Option<FrameTiming>,
     frame_invalidated_at: Option<std::time::Instant>,
     playing: bool,
+    /// True when this editor's native compositor owns the composition layers,
+    /// so this element paints only chrome over them.
+    composed_natively: bool,
 }
 
 impl Canvas {
@@ -61,6 +64,7 @@ impl Canvas {
         frame_timing: Option<FrameTiming>,
         frame_invalidated_at: Option<std::time::Instant>,
         playing: bool,
+        composed_natively: bool,
     ) -> Self {
         Self {
             interactivity: Interactivity::new(),
@@ -85,6 +89,7 @@ impl Canvas {
             frame_timing,
             frame_invalidated_at,
             playing,
+            composed_natively,
         }
     }
 }
@@ -169,6 +174,7 @@ impl Element for Canvas {
         let frame_timing = self.frame_timing.clone();
         let frame_invalidated_at = self.frame_invalidated_at;
         let playing = self.playing;
+        let composed_natively = self.composed_natively;
 
         self.interactivity.paint(
             global_id,
@@ -204,6 +210,7 @@ impl Element for Canvas {
                             frame_timing,
                             frame_invalidated_at,
                             playing,
+                            composed_natively,
                         );
                     });
                 });

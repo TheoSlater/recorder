@@ -1,6 +1,7 @@
-use super::{CanvasHit, hit_test, needs_recenter, preview_geometry};
+use super::{CanvasHit, canvas_placement, hit_test, needs_recenter, preview_geometry};
 use crate::recorder::project_settings::{AspectRatioPreset, CanvasComposition, CanvasView};
-use gpui::{Bounds, point, px, size};
+use crate::recorder::rendering::{CanvasPlacement, PhysicalSize};
+use gpui::{Bounds, Pixels, point, px, size};
 
 #[test]
 fn composition_geometry_stays_centered_and_respects_padding() {
@@ -250,4 +251,81 @@ fn recenter_is_needed_for_panning_or_clipping() {
         pan_y: -1.0,
         ..CanvasView::default()
     }));
+}
+
+const SURROUND: [f32; 4] = [0.1, 0.1, 0.1, 1.0];
+
+fn stage() -> Bounds<Pixels> {
+    Bounds::new(point(px(40.0), px(20.0)), size(px(1000.0), px(600.0)))
+}
+
+fn placement(view: CanvasView, scale_factor: f32) -> CanvasPlacement {
+    let geometry = preview_geometry(
+        stage(),
+        view,
+        &CanvasComposition::default(),
+        1920,
+        1080,
+        None,
+        None,
+    );
+    canvas_placement(stage(), geometry.canvas, SURROUND, scale_factor)
+        .expect("the stage is a usable rectangle")
+}
+
+/// The surface covers the stage, so a fitted canvas is a sub-rectangle of it —
+/// and drawing the composition across the whole surface is exactly the stretch
+/// this conversion exists to prevent.
+#[test]
+fn places_the_fitted_canvas_inside_the_stage() {
+    let placement = placement(CanvasView::default(), 1.0);
+
+    // 16:9 fitted into 1000x600 is 1000x562.5, centred vertically.
+    assert!((placement.rect.width - 1.0).abs() < 1e-6, "{placement:?}");
+    assert!((placement.rect.x).abs() < 1e-6, "{placement:?}");
+    assert!(placement.rect.height < 1.0);
+    assert!(
+        (placement.rect.y - (1.0 - placement.rect.height) / 2.0).abs() < 1e-6,
+        "{placement:?}"
+    );
+    assert_eq!(placement.size, PhysicalSize::new(1000, 563));
+    assert_eq!(placement.surround, SURROUND);
+}
+
+#[test]
+fn scales_the_canvas_and_its_radius_with_dpi() {
+    let single = placement(CanvasView::default(), 1.0);
+    let double = placement(CanvasView::default(), 2.0);
+
+    // The rectangle is normalized, so DPI changes only the device-pixel values.
+    assert_eq!(single.rect, double.rect);
+    assert_eq!(double.size.width, single.size.width * 2);
+    assert!((double.corner_radius - single.corner_radius * 2.0).abs() < 1e-4);
+}
+
+/// Viewport zoom and pan may move and scale where the canvas appears, and
+/// nothing else. The composition inside it is evaluated separately and never
+/// sees these values.
+#[test]
+fn the_editor_camera_reaches_the_renderer_only_as_placement() {
+    let resting = placement(CanvasView::default(), 1.0);
+    let navigated = placement(
+        CanvasView {
+            zoom: 2.0,
+            pan_x: 30.0,
+            pan_y: -10.0,
+        },
+        1.0,
+    );
+
+    assert!(navigated.rect.width > resting.rect.width * 1.9);
+    assert!(navigated.rect.x < resting.rect.x);
+    assert_eq!(navigated.size.width, resting.size.width * 2);
+}
+
+#[test]
+fn rejects_a_collapsed_stage() {
+    let empty = Bounds::new(point(px(0.0), px(0.0)), size(px(0.0), px(600.0)));
+
+    assert!(canvas_placement(empty, stage(), SURROUND, 1.0).is_none());
 }

@@ -5,10 +5,14 @@ use super::super::{
     cursor::CursorFrame,
     motion_blur::{RecordingTransform, Vec2},
     project_settings::{CanvasComposition, CanvasView},
+    rendering::{CanvasPlacement, PhysicalSize},
     zoom::ZoomEffect,
 };
 
 const DEFAULT_VIDEO_ASPECT: f32 = 16. / 9.;
+/// Corner radius of the canvas as the editor presents it. This is editor
+/// chrome: the exported frame is a plain rectangle.
+pub(super) const CANVAS_RADIUS: Pixels = px(20.);
 const HANDLE_SIZE: f32 = 12.;
 const VIEWPORT_ZOOM_TOLERANCE: f64 = 0.001;
 const VIEWPORT_PAN_TOLERANCE: f64 = 0.5;
@@ -75,6 +79,42 @@ pub(super) fn preview_geometry(
         recording_transform: composition_frame.recording_transform(),
         zoom_focus: composition_frame.zoom_center(),
     }
+}
+
+/// Where the composition canvas sits inside the preview surface.
+///
+/// The native surface covers the whole stage, so this is the one value that
+/// carries the editor camera across to the renderer — and it carries it as
+/// layout. [`preview_geometry`] has already applied the camera to `canvas`;
+/// nothing downstream reads it again, which is what keeps viewport navigation
+/// out of composed pixels.
+pub(super) fn canvas_placement(
+    stage: Bounds<Pixels>,
+    canvas: Bounds<Pixels>,
+    surround: [f32; 4],
+    scale_factor: f32,
+) -> Option<CanvasPlacement> {
+    let stage_width = stage.size.width.as_f32();
+    let stage_height = stage.size.height.as_f32();
+    if !(stage_width > 0.0 && stage_height > 0.0) {
+        return None;
+    }
+    let size = PhysicalSize::from_logical(
+        canvas.size.width.as_f32(),
+        canvas.size.height.as_f32(),
+        scale_factor,
+    )?;
+    Some(CanvasPlacement {
+        rect: NormalizedRect {
+            x: f64::from((canvas.origin.x.as_f32() - stage.origin.x.as_f32()) / stage_width),
+            y: f64::from((canvas.origin.y.as_f32() - stage.origin.y.as_f32()) / stage_height),
+            width: f64::from(canvas.size.width.as_f32() / stage_width),
+            height: f64::from(canvas.size.height.as_f32() / stage_height),
+        },
+        size,
+        corner_radius: CANVAS_RADIUS.as_f32() * scale_factor,
+        surround,
+    })
 }
 
 /// Returns whether the editor camera needs a recenter affordance.

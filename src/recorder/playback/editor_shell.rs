@@ -28,7 +28,7 @@ pub(super) fn render(view: &PlaybackView, cx: &mut Context<PlaybackView>) -> imp
         .relative()
         .size_full()
         .min_h(px(0.))
-        .bg(super::preview_spike::background(cx.theme().background))
+        .bg(view.native_preview.background(cx.theme().background))
         .text_color(cx.theme().foreground)
         .capture_key_down(cx.listener(|view, event: &KeyDownEvent, window, cx| {
             if !event.is_held

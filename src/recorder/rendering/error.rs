@@ -4,14 +4,11 @@ use thiserror::Error;
 ///
 /// Variants are deliberately platform-neutral: a backend converts its own
 /// device errors into these so the editor never has to match on a D3D, Metal,
-/// or Vulkan result.
+/// or Vulkan result. A platform with no backend at all is not an error here —
+/// [`available_backend`](super::available_backend) simply keeps the editor on
+/// the legacy preview.
 #[derive(Debug, Error)]
 pub(crate) enum RenderError {
-    /// The platform has no preview backend compiled in. The caller falls back
-    /// to the legacy GPUI preview rather than failing the editor.
-    #[error("native preview is not supported on this platform yet")]
-    Unsupported,
-
     /// The native surface could not be created, resized, or attached.
     #[error("preview surface failed: {0}")]
     Surface(String),

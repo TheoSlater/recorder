@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow};
 use crossbeam_channel::Receiver;
 use gpui::*;
 use gpui_component::{
+    ActiveTheme,
     color_picker::ColorPickerEvent,
     select::{SelectEvent, SelectState},
     slider::{SliderEvent, SliderState},
@@ -27,6 +28,7 @@ use super::super::{
         CanvasBackgroundKind, CanvasComposition, CanvasView, MAX_CANVAS_ZOOM, MIN_CANVAS_ZOOM,
         ProjectSettings,
     },
+    rendering::{CanvasPlacement, CompositionState, PhysicalSize},
     thumbnails::ThumbnailManager,
     zoom::{
         CursorSizeRegion, MAX_ZOOM_REGION_SCALE, MIN_CURSOR_SIZE_REGION_DURATION_US,
@@ -84,7 +86,7 @@ pub(crate) struct PlaybackView {
     pub(super) cursor_frame: Option<super::super::cursor::CursorFrame>,
     pub(super) cursor_images: [Arc<RenderImage>; 2],
     pub(super) motion_blur: MotionBlurState,
-    pub(super) preview_spike: super::preview_spike::PreviewSpike,
+    pub(super) native_preview: super::native_preview::NativePreview,
     pub(super) image: Option<Arc<RenderImage>>,
     pub(super) video_width: u32,
     pub(super) video_height: u32,
@@ -195,7 +197,7 @@ impl PlaybackView {
             cursor_frame: None,
             cursor_images,
             motion_blur: MotionBlurState::default(),
-            preview_spike: super::preview_spike::PreviewSpike::default(),
+            native_preview: super::native_preview::NativePreview::default(),
             image: None,
             video_width: 0,
             video_height: 0,
@@ -279,7 +281,7 @@ impl PlaybackView {
             cursor_frame: None,
             cursor_images,
             motion_blur: MotionBlurState::default(),
-            preview_spike: super::preview_spike::PreviewSpike::default(),
+            native_preview: super::native_preview::NativePreview::default(),
             image: None,
             video_width: 0,
             video_height: 0,
@@ -741,10 +743,17 @@ impl PlaybackView {
     /// time-dependent is evaluated by the shared composition module, and the
     /// editor camera is deliberately absent, so navigating the workspace cannot
     /// reach the composited output.
+    /// The frame the native compositor should draw, in the canvas rectangle the
+    /// editor has laid out.
+    ///
+    /// The composition itself is evaluated exactly as export evaluates it, so
+    /// the preview and the exported file describe the same picture. The editor
+    /// camera enters only through `canvas`, and only as layout.
     pub(super) fn composition_state(
         &self,
-        output_size: super::super::rendering::PhysicalSize,
-    ) -> Option<super::super::rendering::CompositionState> {
+        target_size: PhysicalSize,
+        canvas: CanvasPlacement,
+    ) -> Option<CompositionState> {
         let source = super::super::composition::SourceSize {
             width: self.video_width,
             height: self.video_height,
@@ -752,8 +761,9 @@ impl PlaybackView {
         if !source.valid() {
             return None;
         }
-        Some(super::super::rendering::CompositionState::new(
-            output_size,
+        Some(CompositionState::new(
+            target_size,
+            canvas,
             source,
             super::super::composition::evaluate(
                 &self.project_settings,
@@ -764,6 +774,17 @@ impl PlaybackView {
             self.project_settings.canvas_composition.background.clone(),
             self.motion_blur.display(),
         ))
+    }
+
+    /// Where the composition canvas sits inside the preview surface.
+    pub(super) fn canvas_placement(
+        &self,
+        stage: Bounds<Pixels>,
+        surround: [f32; 4],
+        scale_factor: f32,
+    ) -> Option<CanvasPlacement> {
+        let geometry = self.canvas_geometry()?;
+        editor_canvas_geometry::canvas_placement(stage, geometry.canvas, surround, scale_factor)
     }
 
     fn canvas_geometry(&self) -> Option<editor_canvas_geometry::CanvasGeometry> {
@@ -2414,7 +2435,8 @@ impl Render for PlaybackView {
         self.motion_blur.set_scale_factor(window.scale_factor());
         let stage = *self.canvas_bounds.borrow();
         if let Some(stage) = stage {
-            super::preview_spike::attach(self, window, stage);
+            let workspace = cx.theme().background;
+            super::native_preview::compose(self, window, stage, workspace);
         }
         for image in self.thumbnail_manager.take_image_releases() {
             let _ = window.drop_image(image);
