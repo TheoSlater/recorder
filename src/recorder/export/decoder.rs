@@ -65,6 +65,27 @@ pub(crate) struct DeviceContext {
     pub(crate) manager: IMFDXGIDeviceManager,
 }
 
+impl DeviceContext {
+    /// Wraps a device the caller already owns in the Media Foundation manager
+    /// the source reader needs.
+    ///
+    /// The preview creates its device in the renderer, because the swapchain
+    /// and the decoder have to agree on one, and hands it here.
+    pub(crate) fn adopt(device: ID3D11Device, context: ID3D11DeviceContext) -> Result<Self> {
+        let mut token = 0;
+        let mut manager = None;
+        unsafe { MFCreateDXGIDeviceManager(&mut token, &mut manager) }
+            .context("could not create Media Foundation D3D manager")?;
+        let manager = manager.ok_or_else(|| anyhow!("Media Foundation D3D manager is null"))?;
+        unsafe { manager.ResetDevice(&device, token) }.context("could not bind D3D11 device")?;
+        Ok(Self {
+            device,
+            context,
+            manager,
+        })
+    }
+}
+
 pub(crate) struct SourceFrame {
     pub(crate) texture: ID3D11Texture2D,
     pub(crate) timestamp_100ns: u64,
@@ -116,6 +137,15 @@ impl Decoder {
 
     pub(crate) fn open(path: &Path) -> Result<Self> {
         let device = create_device().context("could not create the export D3D11 device")?;
+        Self::open_on(path, device)
+    }
+
+    /// Opens the recording against a device the caller already owns.
+    ///
+    /// The preview shares one device between this decoder and its compositor,
+    /// so decoded textures are sampled where they were produced instead of
+    /// being copied between devices.
+    pub(crate) fn open_on(path: &Path, device: DeviceContext) -> Result<Self> {
         let reader = create_reader(path, &device.manager)?;
         let native_type = unsafe { reader.GetNativeMediaType(VIDEO_STREAM, 0) }
             .context("could not read recording media type")?;
@@ -249,17 +279,7 @@ fn create_device() -> Result<DeviceContext> {
     }
     let device = device.ok_or_else(|| anyhow!("D3D11 device creation returned null"))?;
     let context = context.ok_or_else(|| anyhow!("D3D11 context creation returned null"))?;
-    let mut token = 0;
-    let mut manager = None;
-    unsafe { MFCreateDXGIDeviceManager(&mut token, &mut manager) }
-        .context("could not create Media Foundation D3D manager")?;
-    let manager = manager.ok_or_else(|| anyhow!("Media Foundation D3D manager is null"))?;
-    unsafe { manager.ResetDevice(&device, token) }.context("could not bind D3D11 device")?;
-    Ok(DeviceContext {
-        device,
-        context,
-        manager,
-    })
+    DeviceContext::adopt(device, context)
 }
 
 fn create_reader(path: &Path, manager: &IMFDXGIDeviceManager) -> Result<IMFSourceReader> {

@@ -42,7 +42,9 @@
 //!    the background there is enough.
 //! 3. The editor's own shell and preview backgrounds.
 
+mod device;
 mod pipeline;
+mod source;
 mod surface;
 mod texture;
 

@@ -435,6 +435,17 @@ Native Windows screen recorder built with GPUI, gpui-component, and
   reads the editor camera, so workspace navigation cannot reach composited
   output. A stand-in checkerboard with a marked corner stands in for the decoded
   frame; swapping the source texture is all the next milestone changes.
+- Media Foundation decodes directly onto the compositor's device. The renderer
+  creates one multithread-protected D3D11 device with video and BGRA support,
+  `DeviceContext::adopt` wraps it in the Media Foundation manager, and
+  `Decoder::open_on` opens the recording against it, so a hardware-decoded
+  texture is sampled where it was written. A 3440x1440 frame reaching the
+  preview this way is confirmed on hardware.
+- Decoding runs on its own thread because GPUI's thread is an STA: its Windows
+  platform calls `OleInitialize`, so Media Foundation cannot start there. Each
+  frame is copied GPU-to-GPU into a texture the renderer owns before crossing
+  threads, which decouples it from the sample that produced it; the shared
+  device being multithread-protected is what makes that crossing legal.
 - Making the surface visible requires clearing three opaque layers, and missing
   any one hides it entirely: the window appearance (GPUI's Windows backend
   ignores `WindowOptions::window_background`, so `set_background_appearance` has
@@ -456,11 +467,10 @@ Native Windows screen recorder built with GPUI, gpui-component, and
 - Track the preview rectangle across resize, DPI change, monitor moves, and
   minimise/restore, so the surface follows the rectangle GPUI assigns instead of
   the one it was created with.
-- Feed decoded frames to the preview surface: `export::decoder` already yields
-  `ID3D11Texture2D` with no CPU readback, so the remaining work is sharing one
-  device between the decoder and the surface and replacing the stand-in texture.
-  The preview's NV12 to BGRA conversion and its `RenderImage` uploads retire
-  with it.
+- Turn the single decoded frame into streaming playback: keep the existing
+  bounded worker, seek generations, and stale-frame rejection, and route frames
+  through `FrameQueue` to the surface. The preview's NV12 to BGRA conversion and
+  its `RenderImage` uploads retire with it.
 - Fold the exporter's draw loop into the preview pipeline once the preview
   composes a real frame, so one compositor serves both targets.
 - Remove the probe module and its three background overrides once the backend

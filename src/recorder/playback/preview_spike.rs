@@ -57,7 +57,8 @@ mod platform {
     use raw_window_handle::HasWindowHandle;
 
     use super::super::super::rendering::{
-        CompositionState, PreviewBounds, PreviewSurface, probe, window_handle,
+        CompositionState, FrameId, PreviewBounds, PreviewRenderer, PreviewSurface, probe,
+        window_handle,
     };
 
     #[derive(Default)]
@@ -67,11 +68,39 @@ mod platform {
     }
 
     impl Attachment {
+        /// Follows the playhead and the preview rectangle once attached.
+        pub(super) fn update(
+            &mut self,
+            bounds: Option<PreviewBounds>,
+            timestamp_us: u64,
+            composition: Option<&CompositionState>,
+        ) {
+            let Some(surface) = self.surface.as_mut() else {
+                return;
+            };
+            if let Some(bounds) = bounds
+                && let Err(error) = surface.set_bounds(bounds)
+            {
+                tracing::warn!(target: "recorder::rendering", %error, "could not move the preview surface");
+            }
+            surface.follow(timestamp_us);
+            let Some(composition) = composition else {
+                return;
+            };
+            if let Err(error) =
+                PreviewRenderer::render(surface, &FrameId::new(0, 0, timestamp_us), composition)
+                    .and_then(|_| PreviewRenderer::present(surface))
+            {
+                tracing::warn!(target: "recorder::rendering", %error, "preview frame failed");
+            }
+        }
+
         pub(super) fn attach(
             &mut self,
             window: &Window,
             stage: Bounds<Pixels>,
             composition: Option<CompositionState>,
+            video_path: std::path::PathBuf,
         ) -> bool {
             if self.attempted {
                 return self.surface.is_some();
@@ -104,8 +133,11 @@ mod platform {
             };
 
             self.attempted = true;
-            match probe(hwnd, bounds, &composition) {
-                Ok(surface) => {
+            match probe(hwnd, bounds, &composition, video_path.clone()) {
+                Ok(mut surface) => {
+                    if let Err(error) = surface.stream(video_path) {
+                        tracing::error!(target: "recorder::rendering", %error, "preview streaming unavailable");
+                    }
                     tracing::info!(
                         target: "recorder::rendering",
                         x = bounds.x,
@@ -144,8 +176,17 @@ mod platform {
             _window: &Window,
             _stage: Bounds<Pixels>,
             _composition: Option<super::super::super::rendering::CompositionState>,
+            _video_path: std::path::PathBuf,
         ) -> bool {
             false
+        }
+
+        pub(super) fn update(
+            &mut self,
+            _bounds: Option<super::super::super::rendering::PreviewBounds>,
+            _timestamp_us: u64,
+            _composition: Option<&super::super::super::rendering::CompositionState>,
+        ) {
         }
     }
 }
@@ -166,11 +207,23 @@ pub(super) fn attach(view: &mut super::PlaybackView, window: &Window, stage: Bou
         window.scale_factor(),
     )
     .and_then(|size| view.composition_state(size));
+    let video_path = view.video_path.clone();
     if view
         .preview_spike
         .attachment
-        .attach(window, stage, composition)
+        .attach(window, stage, composition.clone(), video_path)
     {
         HOLE_PUNCHED.store(true, Ordering::Relaxed);
     }
+
+    let bounds = super::super::rendering::PreviewBounds::from_logical(
+        stage.origin.x.as_f32(),
+        stage.origin.y.as_f32(),
+        stage.size.width.as_f32(),
+        stage.size.height.as_f32(),
+        window.scale_factor(),
+    );
+    view.preview_spike
+        .attachment
+        .update(bounds, view.timeline.playhead_us, composition.as_ref());
 }

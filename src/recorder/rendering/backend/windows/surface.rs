@@ -5,7 +5,7 @@ use windows::Win32::{
         Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0},
         Direct3D11::{
             D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11CreateDevice, ID3D11Device,
-            ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11Texture2D,
+            ID3D11DeviceContext, ID3D11RenderTargetView, ID3D11ShaderResourceView, ID3D11Texture2D,
         },
         DirectComposition::{
             DCompositionCreateDevice, IDCompositionDevice, IDCompositionTarget, IDCompositionVisual,
@@ -24,7 +24,7 @@ use super::super::super::super::export::renderer::Constants;
 use super::super::super::{
     CompositionState, FrameId, PhysicalSize, PreviewBounds, PreviewRenderer, RenderError,
 };
-use super::{pipeline::Pipeline, texture};
+use super::{device, pipeline::Pipeline, source, texture};
 
 /// Two buffers is enough for a preview that always presents the newest frame;
 /// a deeper chain only adds latency between decode and screen.
@@ -42,6 +42,9 @@ pub(crate) struct DirectCompositionSurface {
     bounds: PreviewBounds,
     pipeline: Pipeline,
     placeholder: texture::StaticTexture,
+    /// The most recently decoded frame, or `None` before one arrives.
+    frame: Option<source::DecodedTexture>,
+    streaming: Option<source::PreviewSource>,
 }
 
 impl DirectCompositionSurface {
@@ -54,7 +57,7 @@ impl DirectCompositionSurface {
         if bounds.size.is_empty() {
             return Err(RenderError::Surface("preview rectangle is empty".into()));
         }
-        let (device, context) = create_device()?;
+        let (device, context) = device::create()?;
         let dxgi_device: IDXGIDevice = device
             .cast()
             .map_err(|error| RenderError::Device(format!("no DXGI device: {error}")))?;
@@ -89,6 +92,8 @@ impl DirectCompositionSurface {
             bounds,
             pipeline,
             placeholder,
+            frame: None,
+            streaming: None,
         };
         unsafe {
             surface
@@ -117,7 +122,7 @@ impl DirectCompositionSurface {
     }
 
     pub(crate) fn resize(&mut self, size: PhysicalSize) -> Result<(), RenderError> {
-        if size.is_empty() || size == self.bounds.size {
+        if size.is_empty() {
             return Ok(());
         }
         unsafe {
@@ -135,6 +140,79 @@ impl DirectCompositionSurface {
         }
         self.bounds.size = size;
         Ok(())
+    }
+
+    /// Decodes the frame current at `timestamp_100ns` and keeps it for
+    /// rendering.
+    ///
+    /// The decoder runs on the compositor's own device, so the texture it
+    /// produces is sampled where it was written: no readback, no cross-device
+    /// transfer, and no `RenderImage` upload.
+    pub(crate) fn decode(
+        &mut self,
+        path: std::path::PathBuf,
+        timestamp_100ns: u64,
+    ) -> Result<(), RenderError> {
+        let frame = source::decode_frame(&self.device, &self.context, path, timestamp_100ns)?;
+        tracing::info!(
+            target: "recorder::rendering",
+            width = frame.size.width,
+            height = frame.size.height,
+            timestamp_100ns = frame.timestamp_100ns,
+            "decoded a GPU frame onto the compositor device"
+        );
+        self.frame = Some(frame);
+        Ok(())
+    }
+
+    /// Starts following the playhead, decoding on this surface's own device.
+    pub(crate) fn stream(&mut self, path: std::path::PathBuf) -> Result<(), RenderError> {
+        self.streaming = Some(source::PreviewSource::start(
+            &self.device,
+            &self.context,
+            path,
+        )?);
+        Ok(())
+    }
+
+    /// Asks the decoder for the frame at `timestamp_us` and adopts whatever has
+    /// finished since the last call.
+    ///
+    /// Both halves are non-blocking: a decode slower than the preview never
+    /// stalls the editor, it only means this frame repeats.
+    pub(crate) fn follow(&mut self, timestamp_us: u64) {
+        let Some(streaming) = self.streaming.as_ref() else {
+            return;
+        };
+        streaming.seek(timestamp_us.saturating_mul(10));
+        if let Some(frame) = streaming.take() {
+            self.frame = Some(frame);
+        }
+    }
+
+    /// Keeps the surface on the rectangle GPUI assigned.
+    ///
+    /// Resize, DPI change, and monitor moves all arrive here as a new
+    /// rectangle; the swapchain is only rebuilt when the size actually differs.
+    pub(crate) fn set_bounds(&mut self, bounds: PreviewBounds) -> Result<(), RenderError> {
+        if bounds == self.bounds {
+            return Ok(());
+        }
+        let resized = bounds.size != self.bounds.size;
+        self.bounds = bounds;
+        if resized {
+            self.resize(bounds.size)?;
+        }
+        self.place(bounds)
+    }
+
+    /// The picture to compose: a decoded frame once one exists, otherwise the
+    /// bring-up stand-in.
+    fn source_view(&self) -> &ID3D11ShaderResourceView {
+        match self.frame.as_ref() {
+            Some(frame) => &frame.view,
+            None => &self.placeholder.view,
+        }
     }
 
     /// A render target view over the current back buffer.
@@ -191,7 +269,7 @@ impl PreviewRenderer for DirectCompositionSurface {
             .begin(&self.back_buffer()?, self.bounds.size, [0.0; 4]);
         self.pipeline.draw_texture(
             Constants::for_rect(composition.frame.recording),
-            &self.placeholder.view,
+            self.source_view(),
         )
     }
 
@@ -278,14 +356,20 @@ pub(crate) fn probe(
     hwnd: isize,
     bounds: PreviewBounds,
     composition: &CompositionState,
+    video_path: std::path::PathBuf,
 ) -> Result<DirectCompositionSurface, RenderError> {
     let mut surface = DirectCompositionSurface::new(hwnd, bounds)?;
+    // A decode failure must not lose the surface: the stand-in texture keeps
+    // the milestone before it legible instead of leaving a blank rectangle.
+    if let Err(error) = surface.decode(video_path, 0) {
+        tracing::error!(target: "recorder::rendering", %error, "could not decode a preview frame");
+    }
     // Magenta: no part of the editor theme uses it, so it cannot be mistaken
     // for GPUI's own painting.
     surface.clear([1.0, 0.0, 1.0, 1.0])?;
     surface.pipeline.draw_texture(
         Constants::for_rect(composition.frame.recording),
-        &surface.placeholder.view,
+        surface.source_view(),
     )?;
     PreviewRenderer::present(&mut surface)?;
     Ok(surface)
